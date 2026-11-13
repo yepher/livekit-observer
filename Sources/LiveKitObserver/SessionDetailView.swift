@@ -1,0 +1,537 @@
+import Charts
+import SwiftUI
+
+enum DetailTab: String, CaseIterable, Identifiable {
+    case overview = "Overview", spectrogram = "Spectrogram", transcript = "Transcript", logs = "Logs", traces = "Traces", metrics = "Metrics"
+    var id: String { rawValue }
+}
+
+struct SessionDetailView: View {
+    let detail: SessionDetail
+    @Environment(AppModel.self) private var model
+    @State private var tab: DetailTab = .overview
+
+    /// Times are shown relative to the recording when there is one.
+    var origin: Date? { model.player.origin ?? detail.row.startedAt }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            PlayerBar(detail: detail).padding(.horizontal).padding(.bottom, 8)
+            Divider()
+            Picker("View", selection: $tab) { ForEach(DetailTab.allCases) { Text($0.rawValue).tag($0) } }
+                .pickerStyle(.segmented).labelsHidden().padding(10)
+            Group {
+                if tab == .spectrogram {
+                    SpectrogramView(detail: detail, origin: origin)
+                } else if let error = detail.observabilityError, detail.transcript.isEmpty {
+                    ContentUnavailableView {
+                        Label("No LiveKit data", systemImage: "exclamationmark.bubble")
+                    } description: { Text(error.message) } actions: {
+                        Button("Try Again") { model.reloadObservability() }
+                    }
+                } else if detail.loadingObservability && detail.transcript.isEmpty {
+                    ProgressView("Reading transcript, logs, and traces…").frame(maxHeight: .infinity)
+                } else {
+                    switch tab {
+                    case .overview: OverviewView(detail: detail, origin: origin, showTab: { tab = $0 })
+                    case .transcript: TranscriptView(detail: detail, origin: origin)
+                    case .logs: LogsView(detail: detail, origin: origin)
+                    case .traces: TracesView(detail: detail, origin: origin)
+                    case .metrics: MetricsView(detail: detail)
+                    case .spectrogram: EmptyView()
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .navigationTitle(detail.row.title)
+        .navigationSubtitle(detail.row.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "")
+        .toolbar {
+            ToolbarItem {
+                Button { model.openDashboard(detail.row.id) } label: { Label("Open in LiveKit", systemImage: "safari") }
+                    .help(model.projectId == nil ? "LiveKit project ID not found; set it in Settings" : "Open this session in the LiveKit Cloud dashboard")
+                    .disabled(detail.row.session == nil || model.dashboardURL(for: detail.row.id) == nil)
+            }
+            ToolbarItem {
+                Button { model.copyReport() } label: { Label("Copy for Claude", systemImage: "doc.on.clipboard") }
+                    .help("Copy a Markdown summary of this session (transcript, latency, warnings). It contains user speech; paste it only into your own tools.")
+                    .disabled(detail.insights == nil)
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(detail.row.roomName.isEmpty ? detail.row.id : detail.row.roomName).font(.title3.weight(.semibold)).textSelection(.enabled)
+                HStack(spacing: 8) {
+                    Text(detail.row.id).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                    if detail.row.session != nil, let url = model.dashboardURL(for: detail.row.id) {
+                        Link(destination: url) { Label("LiveKit dashboard", systemImage: "arrow.up.right.square") }.font(.caption)
+                    }
+                }
+            }
+            Spacer()
+            if let state = detail.dataState, state != "settled" {
+                Label(state == "settling" ? "Data still arriving" : "Session in progress", systemImage: "hourglass").font(.caption).foregroundStyle(.orange)
+            }
+            LabeledContent("Duration", value: Format.duration(detail.row.duration)).font(.caption)
+        }
+        .padding()
+    }
+}
+
+struct PlayerBar: View {
+    let detail: SessionDetail
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let player = model.player
+        HStack(spacing: 12) {
+            if detail.loadingAudio {
+                ProgressView().controlSize(.small)
+                Text("Downloading recording…").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            } else if player.isLoaded {
+                Button { player.skip(-10) } label: { Image(systemName: "gobackward.10") }.buttonStyle(.borderless)
+                Button { player.toggle() } label: { Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill").font(.title) }
+                    .buttonStyle(.borderless)
+                Button { player.skip(10) } label: { Image(systemName: "goforward.10") }.buttonStyle(.borderless)
+                Text(Format.duration(player.currentTime)).font(.caption.monospacedDigit())
+                Slider(value: Binding(get: { player.currentTime }, set: { player.seek(to: $0) }), in: 0...max(player.duration, 1))
+                Text(Format.duration(player.duration)).font(.caption.monospacedDigit())
+                Picker("Speed", selection: Binding(get: { player.rate }, set: { player.rate = $0 })) {
+                    ForEach([0.75, 1, 1.25, 1.5, 2] as [Float], id: \.self) { Text("\($0.formatted())×").tag($0) }
+                }
+                .labelsHidden().frame(width: 70)
+                if detail.sources.count > 1 {
+                    Picker("Recording", selection: Binding(get: { detail.activeSource ?? .egress }, set: { model.selectSource($0) })) {
+                        ForEach(detail.sources) { Text($0.title).tag($0.kind) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
+                    .help("Switch recordings at the same moment of the session")
+                } else {
+                    Text(detail.audioSource).font(.caption2).foregroundStyle(.secondary)
+                }
+                if let error = detail.audioError {
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange).help(error)
+                }
+            } else {
+                Label(detail.audioError ?? "No recording", systemImage: "speaker.slash").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
+        .frame(height: 32)
+    }
+}
+
+/// A clickable time that plays the recording from that moment.
+struct TimeButton: View {
+    let date: Date?
+    let origin: Date?
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let playable = model.player.offset(for: date) != nil
+        Button { model.player.play(at: date) } label: {
+            Text(Format.offset(date, from: origin)).font(.caption.monospacedDigit())
+        }
+        .buttonStyle(.borderless).disabled(!playable)
+        .help(playable ? "Play from here" : "Not in the recording")
+    }
+}
+
+// MARK: Overview
+
+struct OverviewView: View {
+    let detail: SessionDetail
+    let origin: Date?
+    let showTab: (DetailTab) -> Void
+
+    var body: some View {
+        ScrollView {
+            if let i = detail.insights {
+                VStack(alignment: .leading, spacing: 20) {
+                    Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
+                        GridRow { stat("Agent turns", "\(i.agentTurns)"); stat("User turns", "\(i.userTurns)"); stat("Interrupted", "\(i.interruptions)"); stat("Warnings / errors", "\(i.problems.count)") }
+                    }
+                    GroupBox("Latency") {
+                        Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 6) {
+                            GridRow { Text(""); header("Median"); header("p95"); header("Max"); header("Turns") }
+                            latency("End-to-end response", i.e2e)
+                            latency("LLM first token", i.llmTtft)
+                            latency("TTS first byte", i.ttsTtfb)
+                            latency("User end-of-turn delay", i.endOfTurn)
+                            latency("Speech-to-text delay", i.transcription)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(4)
+                    }
+                    if !e2ePoints.isEmpty {
+                        GroupBox("Response time per agent turn") {
+                            Chart(e2ePoints, id: \.0) { point in
+                                BarMark(x: .value("Turn", point.0), y: .value("ms", point.1))
+                                    .foregroundStyle(point.1 >= SessionInsights.slowTurnMs ? .orange : .accentColor)
+                                RuleMark(y: .value("Slow", SessionInsights.slowTurnMs)).foregroundStyle(.orange.opacity(0.4)).lineStyle(.init(dash: [4]))
+                            }
+                            .chartXAxisLabel("Agent turn").chartYAxisLabel("ms").frame(height: 160).padding(4)
+                        }
+                    }
+                    findings("Slow responses (≥ \(Int(SessionInsights.slowTurnMs)) ms)", items: i.slowTurns.map { Finding(date: $0.start, text: "\(Format.ms($0.e2eLatencyMs))  \($0.text)") })
+                    findings("Low-confidence user speech (< \(SessionInsights.lowConfidence.formatted()))", items: i.lowConfidence.map { Finding(date: $0.start, text: String(format: "%.2f  %@", $0.confidence ?? 0, $0.text)) })
+                    findings("Warnings and errors", items: i.problems.map { Finding(date: $0.timestamp, text: "\($0.level.label.uppercased())  \($0.logger.isEmpty ? "" : $0.logger + ": ")\($0.message)", detail: $0.attributes) }, more: { showTab(.logs) })
+                    findings("Failed spans", items: i.failedSpans.map { Finding(date: $0.start, text: "\($0.name)  \($0.statusMessage)", detail: $0.attributes) }, more: { showTab(.traces) })
+                }
+                .padding()
+            }
+        }
+    }
+
+    private var e2ePoints: [(Int, Double)] {
+        detail.transcript.filter { $0.role == .agent }.compactMap(\.e2eLatencyMs).enumerated().map { ($0 + 1, $1) }
+    }
+
+    private func stat(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading) { Text(value).font(.title2.weight(.semibold).monospacedDigit()); Text(label).font(.caption).foregroundStyle(.secondary) }
+    }
+    private func header(_ text: String) -> some View { Text(text).font(.caption).foregroundStyle(.secondary) }
+    @ViewBuilder private func latency(_ label: String, _ s: SessionInsights.Stat?) -> some View {
+        GridRow {
+            Text(label)
+            Text(Format.ms(s?.median)).monospacedDigit()
+            Text(Format.ms(s?.p95)).monospacedDigit().foregroundStyle((s?.p95 ?? 0) >= SessionInsights.slowTurnMs ? .orange : .primary)
+            Text(Format.ms(s?.max)).monospacedDigit()
+            Text(s.map { "\($0.count)" } ?? "–").monospacedDigit().foregroundStyle(.secondary)
+        }
+    }
+    struct Finding {
+        let date: Date?
+        let text: String
+        var detail: [String: JSONValue] = [:]
+    }
+
+    /// A finding as plain text: time from recording start, the text, and any attributes.
+    private func copyText(_ f: Finding, includeDetail: Bool) -> String {
+        var line = "[\(Format.offset(f.date, from: origin))] \(f.text)"
+        if includeDetail, !f.detail.isEmpty {
+            line += "\n" + f.detail.keys.sorted().map { "    \($0): \(f.detail[$0]!.description)" }.joined(separator: "\n")
+        }
+        return line
+    }
+
+    @ViewBuilder private func findings(_ title: String, items: [Finding], limit: Int = 15, more: (() -> Void)? = nil) -> some View {
+        if !items.isEmpty {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(items.prefix(limit).enumerated()), id: \.offset) { _, item in
+                        FindingRow(time: TimeButton(date: item.date, origin: origin), text: item.text) {
+                            AppModel.copy(copyText(item, includeDetail: true))
+                        }
+                    }
+                    if items.count > limit, let more { Button("Show all \(items.count)", action: more).buttonStyle(.link) }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } label: {
+                HStack {
+                    Text(title).font(.headline)
+                    Text("\(items.count)").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button { AppModel.copy(items.map { copyText($0, includeDetail: false) }.joined(separator: "\n")) } label: {
+                        Label("Copy all", systemImage: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless).font(.caption).help("Copy every item in this list as text")
+                }
+            }
+        }
+    }
+}
+
+// MARK: Transcript
+
+struct TranscriptView: View {
+    let detail: SessionDetail
+    let origin: Date?
+    @Environment(AppModel.self) private var model
+    @State private var follow = true
+
+    var body: some View {
+        let current = currentItemID
+        ScrollViewReader { proxy in
+            List(detail.transcript) { item in
+                TranscriptRow(item: item, origin: origin, isCurrent: item.id == current)
+                    .id(item.id)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { model.player.play(at: item.start) }
+            }
+            .onChange(of: current) { _, id in
+                if follow, model.player.isPlaying, let id { withAnimation { proxy.scrollTo(id, anchor: .center) } }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                Toggle("Follow playback", isOn: $follow).toggleStyle(.checkbox)
+                Spacer()
+                Text("Double-click a line to play it.").foregroundStyle(.secondary)
+            }
+            .font(.caption).padding(8).background(.bar)
+        }
+    }
+
+    /// The line being spoken at the playhead.
+    private var currentItemID: TranscriptItem.ID? {
+        guard model.player.isLoaded, let now = model.player.currentDate else { return nil }
+        return detail.transcript.last { ($0.start ?? .distantFuture) <= now }?.id
+    }
+}
+
+struct TranscriptRow: View {
+    let item: TranscriptItem
+    let origin: Date?
+    let isCurrent: Bool
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            TimeButton(date: item.start, origin: origin).frame(width: 56, alignment: .leading)
+            Text(speaker).font(.caption.weight(.semibold)).foregroundStyle(color).frame(width: 64, alignment: .leading)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.text).textSelection(.enabled)
+                    .font(item.kind == "message" ? .body : .callout.monospaced())
+                let notes = annotations
+                if !notes.isEmpty {
+                    Text(notes.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+        .listRowBackground(isCurrent ? Color.accentColor.opacity(0.15) : (item.e2eLatencyMs ?? 0) >= SessionInsights.slowTurnMs ? Color.orange.opacity(0.08) : nil)
+    }
+
+    private var speaker: String {
+        switch item.role {
+        case .agent: return "Agent"
+        case .user: return "User"
+        case .system: return "System"
+        case .other: return item.kind.replacingOccurrences(of: "_", with: " ")
+        }
+    }
+    private var color: Color { item.role == .agent ? .blue : item.role == .user ? .green : .secondary }
+    private var annotations: [String] {
+        var notes: [String] = []
+        if let e = item.e2eLatencyMs { notes.append("response \(Format.ms(e))") }
+        if let l = item.llmTtftMs { notes.append("LLM \(Format.ms(l))") }
+        if let t = item.ttsTtfbMs { notes.append("TTS \(Format.ms(t))") }
+        if let c = item.confidence { notes.append(String(format: "confidence %.2f", c)) }
+        if let d = item.endOfTurnDelayMs { notes.append("end of turn \(Format.ms(d))") }
+        if item.interrupted { notes.append("interrupted") }
+        return notes
+    }
+}
+
+// MARK: Logs
+
+struct LogsView: View {
+    let detail: SessionDetail
+    let origin: Date?
+    @State private var minimum: LogLevel = .info
+    @State private var search = ""
+    @State private var selected: Set<LogRecord.ID> = []
+
+    var body: some View {
+        let records = detail.logs.filter { $0.level >= minimum && (search.isEmpty || $0.message.localizedCaseInsensitiveContains(search) || $0.logger.localizedCaseInsensitiveContains(search)) }
+        VStack(spacing: 0) {
+            HStack {
+                Picker("Level", selection: $minimum) { ForEach(LogLevel.allCases, id: \.self) { Text("\($0.label)+").tag($0) } }.frame(width: 160)
+                TextField("Filter", text: $search).textFieldStyle(.roundedBorder)
+                Text("\(records.count) of \(detail.logs.count)").font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(8)
+            HSplitView {
+                Table(records, selection: $selected) {
+                    TableColumn("Time") { r in TimeButton(date: r.timestamp, origin: origin) }.width(60)
+                    TableColumn("Level") { r in Text(r.level.label).foregroundStyle(color(r.level)) }.width(50)
+                    TableColumn("Logger") { r in Text(r.logger).foregroundStyle(.secondary) }.width(min: 80, ideal: 140)
+                    TableColumn("Message") { r in Text(r.message).lineLimit(2) }
+                }
+                .contextMenu(forSelectionType: LogRecord.ID.self) { ids in
+                    Button(ids.count > 1 ? "Copy \(ids.count) Lines" : "Copy") { copy(ids, from: records) }
+                    Button("Copy Message Only") { AppModel.copy(records.filter { ids.contains($0.id) }.map(\.message).joined(separator: "\n")) }
+                }
+                .onCopyCommand { copy(selected, from: records); return [] }
+                if selected.count == 1, let record = detail.logs.first(where: { selected.contains($0.id) }) {
+                    AttributesView(title: record.message, attributes: record.attributes).frame(minWidth: 240, idealWidth: 300)
+                }
+            }
+        }
+    }
+
+    private func copy(_ ids: Set<LogRecord.ID>, from records: [LogRecord]) {
+        let lines = records.filter { ids.contains($0.id) }.map { r in
+            "[\(Format.offset(r.timestamp, from: origin))] \(r.level.label.uppercased()) \(r.logger.isEmpty ? "" : r.logger + ": ")\(r.message)"
+        }
+        if !lines.isEmpty { AppModel.copy(lines.joined(separator: "\n")) }
+    }
+
+    private func color(_ level: LogLevel) -> Color {
+        switch level { case .warn: .orange; case .error, .fatal: .red; case .debug, .trace: .secondary; default: .primary }
+    }
+}
+
+struct AttributesView: View {
+    let title: String
+    let attributes: [String: JSONValue]
+    var body: some View {
+        List {
+            Section { Text(title).textSelection(.enabled) }
+            Section("Attributes") {
+                ForEach(attributes.keys.sorted(), id: \.self) { key in
+                    VStack(alignment: .leading) {
+                        Text(key).font(.caption).foregroundStyle(.secondary)
+                        Text(attributes[key]!.description).font(.caption.monospaced()).textSelection(.enabled)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: Traces
+
+struct SpanNode: Identifiable {
+    let span: Span
+    var children: [SpanNode]?
+    var id: String { span.id }
+
+    static func tree(_ spans: [Span]) -> [SpanNode] {
+        let ids = Set(spans.map(\.id))
+        let byParent = Dictionary(grouping: spans) { $0.parentId.flatMap { ids.contains($0) ? $0 : nil } ?? "" }
+        func build(_ parent: String) -> [SpanNode] {
+            (byParent[parent] ?? []).sorted { ($0.start ?? .distantPast) < ($1.start ?? .distantPast) }.map { span in
+                let kids = build(span.id)
+                return SpanNode(span: span, children: kids.isEmpty ? nil : kids)
+            }
+        }
+        return build("")
+    }
+}
+
+struct TracesView: View {
+    let detail: SessionDetail
+    let origin: Date?
+    @State private var selected: Span.ID?
+
+    var body: some View {
+        let roots = SpanNode.tree(detail.spans)
+        let start = detail.spans.compactMap(\.start).min()
+        let end = detail.spans.compactMap(\.end).max()
+        let total = max((end ?? .now).timeIntervalSince(start ?? .now), 0.001)
+        HSplitView {
+            List(roots, children: \.children, selection: $selected) { node in
+                HStack {
+                    Image(systemName: node.span.failed ? "xmark.octagon.fill" : "circle.fill").font(.system(size: 6)).foregroundStyle(node.span.failed ? .red : .secondary)
+                    Text(node.span.name).lineLimit(1)
+                    Spacer()
+                    TimelineBar(start: node.span.start, duration: node.span.duration, origin: start, total: total).frame(width: 180, height: 8)
+                    Text(node.span.duration.map { $0 < 1 ? "\(Int($0 * 1000)) ms" : String(format: "%.2f s", $0) } ?? "–")
+                        .font(.caption.monospacedDigit()).foregroundStyle((node.span.duration ?? 0) >= 2 ? .orange : .secondary).frame(width: 64, alignment: .trailing)
+                }
+                .tag(node.id)
+            }
+            if let span = detail.spans.first(where: { $0.id == selected }) {
+                VStack(alignment: .leading) {
+                    HStack { Text("Starts"); TimeButton(date: span.start, origin: origin) }.font(.caption).padding([.top, .horizontal])
+                    AttributesView(title: span.statusMessage.isEmpty ? span.name : "\(span.name): \(span.statusMessage)", attributes: span.attributes)
+                }
+                .frame(minWidth: 240, idealWidth: 320)
+            }
+        }
+        .overlay { if detail.spans.isEmpty { ContentUnavailableView("No trace spans", systemImage: "point.3.connected.trianglepath.dotted") } }
+    }
+}
+
+struct TimelineBar: View {
+    let start: Date?
+    let duration: TimeInterval?
+    let origin: Date?
+    let total: TimeInterval
+    var body: some View {
+        GeometryReader { geo in
+            let x = (start.flatMap { s in origin.map { s.timeIntervalSince($0) } } ?? 0) / total
+            let w = max((duration ?? 0) / total, 0.004)
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                Capsule().fill(Color.accentColor).frame(width: geo.size.width * w).offset(x: geo.size.width * x)
+            }
+        }
+    }
+}
+
+// MARK: Metrics
+
+struct MetricsView: View {
+    let detail: SessionDetail
+
+    struct Summary: Identifiable {
+        let name: String
+        let unit: String
+        let count: Double
+        let mean: Double?
+        let min: Double?
+        let max: Double?
+        let points: Int
+        var id: String { name }
+    }
+
+    var body: some View {
+        let summaries = Dictionary(grouping: detail.metrics, by: \.name).map { name, points in
+            let count = points.compactMap(\.count).reduce(0, +)
+            let sum = points.compactMap(\.sum).reduce(0, +)
+            let values = points.compactMap(\.value)
+            return Summary(
+                name: name, unit: points.first?.unit ?? "", count: count,
+                mean: count > 0 ? sum / count : values.isEmpty ? nil : values.reduce(0, +) / Double(values.count),
+                min: points.compactMap(\.min).min() ?? values.min(), max: points.compactMap(\.max).max() ?? values.max(), points: points.count
+            )
+        }.sorted { $0.name < $1.name }
+        Table(summaries) {
+            TableColumn("Metric") { s in Text(s.name).textSelection(.enabled) }.width(min: 220, ideal: 300)
+            TableColumn("Unit") { s in Text(s.unit).foregroundStyle(.secondary) }.width(40)
+            TableColumn("Count") { s in Text(s.count > 0 ? "\(Int(s.count))" : "–").monospacedDigit() }.width(60)
+            TableColumn("Mean") { s in Text(value(s.mean, s.unit)).monospacedDigit() }.width(80)
+            TableColumn("Min") { s in Text(value(s.min, s.unit)).monospacedDigit() }.width(80)
+            TableColumn("Max") { s in Text(value(s.max, s.unit)).monospacedDigit() }.width(80)
+            TableColumn("Points") { s in Text("\(s.points)").monospacedDigit().foregroundStyle(.secondary) }.width(50)
+        }
+        .overlay { if detail.metrics.isEmpty { ContentUnavailableView("No metrics", systemImage: "chart.xyaxis.line") } }
+    }
+
+    private func value(_ v: Double?, _ unit: String) -> String {
+        guard let v else { return "–" }
+        return unit == "s" ? "\(Int((v * 1000).rounded())) ms" : v.formatted(.number.precision(.significantDigits(4)))
+    }
+}
+
+/// One overview finding: selectable text, with a copy button on hover and in the context menu.
+struct FindingRow: View {
+    let time: TimeButton
+    let text: String
+    let copy: () -> Void
+    @State private var hovering = false
+    @State private var copied = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            time.frame(width: 56, alignment: .leading)
+            Text(text).lineLimit(3).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                copy()
+                copied = true
+                Task { try? await Task.sleep(for: .seconds(1.2)); copied = false }
+            } label: { Image(systemName: copied ? "checkmark" : "doc.on.doc") }
+                .buttonStyle(.borderless).help("Copy this line and its details")
+                .opacity(hovering || copied ? 1 : 0)
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .contextMenu { Button("Copy", action: copy) }
+    }
+}
