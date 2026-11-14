@@ -88,13 +88,18 @@ final class SessionDetail {
     var originCorrection: [RecordingSource.Kind: TimeInterval] = [:]
     /// How the egress recording was lined up with LiveKit's, shown beside it.
     var alignment: Alignment = .reported
+    /// Stretches marked while reviewing, highlighted in every view; saved per session.
+    var flags: [Flag] = []
 
     enum Alignment { case reported, byAudio, byHand, noMatch }
 
     /// When a recording's first sample was heard, corrected so the recordings line up with LiveKit's clock.
     func origin(of source: RecordingSource) -> Date? { source.origin?.addingTimeInterval(originCorrection[source.kind] ?? 0) }
 
-    init(row: SessionRow) { self.row = row }
+    init(row: SessionRow) {
+        self.row = row
+        flags = Self.loadFlags(row.id)
+    }
 }
 
 @MainActor @Observable
@@ -118,6 +123,8 @@ final class AppModel {
     var onlyWithRecording = false
     let player = AudioPlayer()
     let skimmer = Skimmer()
+    /// The flag whose note is being edited, shown as a sheet over the session.
+    var renamingFlag: Flag.ID?
 
     private var settings = AppSettings()
     private var manifests: [String: EgressRecording] = [:]
@@ -510,9 +517,36 @@ final class AppModel {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
+    @ObservationIgnored private var spaceMonitor: Any?
+
+    /// Space plays and pauses anywhere in the session window, whatever has focus, except while typing.
+    /// A menu shortcut is not enough: lists, tables, and focused buttons take the key first, and the
+    /// menu would take spaces typed into the filter fields.
+    func handleSpaceBar() {
+        guard spaceMonitor == nil else { return }
+        spaceMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.keyCode == 49,
+                  event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+                  let window = event.window, window.attachedSheet == nil,
+                  !(window.firstResponder is NSText),  // a text field or the note being typed
+                  !(window.identifier?.rawValue.contains("Settings") ?? false),
+                  self.player.isLoaded
+            else { return event }
+            if !event.isARepeat { self.player.toggle() }
+            return nil
+        }
+    }
+
+    /// Flags the turn at the playhead and asks for a note.
+    func flagPlayhead() {
+        guard let detail, let now = player.currentDate else { return }
+        renamingFlag = (detail.flag(at: now) ?? detail.addFlag(at: now)).id
+    }
+
     func copyReport() {
         guard let detail, let insights = detail.insights else { return }
-        let text = SessionReport.markdown(row: detail.row, transcript: detail.transcript, insights: insights, origin: player.origin ?? detail.row.startedAt)
+        let text = SessionReport.markdown(row: detail.row, transcript: detail.transcript, insights: insights, origin: player.origin ?? detail.row.startedAt,
+                                          flags: detail.flags, logs: detail.logs, spans: detail.spans)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }

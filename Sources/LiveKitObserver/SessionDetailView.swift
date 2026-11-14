@@ -10,6 +10,7 @@ struct SessionDetailView: View {
     let detail: SessionDetail
     @Environment(AppModel.self) private var model
     @State private var tab: DetailTab = .overview
+    @State private var flagNote = ""
 
     /// Times are shown relative to the recording when there is one.
     var origin: Date? { model.player.origin ?? detail.row.startedAt }
@@ -47,7 +48,19 @@ struct SessionDetailView: View {
         }
         .navigationTitle(detail.row.title)
         .navigationSubtitle(detail.row.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "")
+        .alert("Flag", isPresented: Binding(get: { model.renamingFlag != nil }, set: { if !$0 { model.renamingFlag = nil } })) {
+            TextField("What's wrong here?", text: $flagNote)
+            Button("Save") { if let id = model.renamingFlag { detail.renameFlag(id, to: flagNote) } }.keyboardShortcut(.defaultAction)
+            Button("Remove Flag", role: .destructive) { if let id = model.renamingFlag { detail.removeFlag(id) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if let flag = detail.flags.first(where: { $0.id == model.renamingFlag }) {
+                Text("\(Format.offset(flag.start, from: origin))–\(Format.offset(flag.end, from: origin)). Flagged moments are highlighted in every view and listed in Copy for Claude.")
+            }
+        }
+        .onChange(of: model.renamingFlag) { _, id in flagNote = detail.flags.first { $0.id == id }?.note ?? "" }
         .toolbar {
+            ToolbarItem { FlagsMenu(detail: detail, origin: origin) }
             ToolbarItem {
                 Button { model.openDashboard(detail.row.id) } label: { Label("Open in LiveKit", systemImage: "safari") }
                     .help(model.projectId == nil ? "LiveKit project ID not found; set it in Settings" : "Open this session in the LiveKit Cloud dashboard")
@@ -154,6 +167,7 @@ struct OverviewView: View {
         ScrollView {
             if let i = detail.insights {
                 VStack(alignment: .leading, spacing: 20) {
+                    if !detail.flags.isEmpty { FlagsBox(detail: detail, origin: origin) }
                     Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
                         GridRow { stat("Agent turns", "\(i.agentTurns)"); stat("User turns", "\(i.userTurns)"); stat("Interrupted", "\(i.interruptions)"); stat("Warnings / errors", "\(i.problems.count)") }
                     }
@@ -225,7 +239,7 @@ struct OverviewView: View {
             GroupBox {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(items.prefix(limit).enumerated()), id: \.offset) { _, item in
-                        FindingRow(time: TimeButton(date: item.date, origin: origin), text: item.text) {
+                        FindingRow(time: TimeButton(date: item.date, origin: origin), text: item.text, flag: detail.flag(at: item.date)) {
                             AppModel.copy(copyText(item, includeDetail: true))
                         }
                     }
@@ -254,15 +268,24 @@ struct TranscriptView: View {
     let origin: Date?
     @Environment(AppModel.self) private var model
     @State private var follow = true
+    @State private var onlyFlagged = false
 
     var body: some View {
         let current = currentItemID
         ScrollViewReader { proxy in
-            List(detail.transcript) { item in
-                TranscriptRow(item: item, origin: origin, isCurrent: item.id == current)
+            List(onlyFlagged ? detail.transcript.filter { detail.flag(for: $0) != nil } : detail.transcript) { item in
+                TranscriptRow(item: item, origin: origin, isCurrent: item.id == current, flag: detail.flag(for: item))
                     .id(item.id)
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2) { model.player.play(at: item.start) }
+                    .contextMenu {
+                        if let start = item.start {
+                            FlagMenuItems(detail: detail, existing: detail.flag(for: item), title: "Flag This Line") {
+                                detail.addFlag(from: start, to: item.stoppedSpeakingAt ?? start.addingTimeInterval(1), note: SessionDetail.label(for: item))
+                            }
+                        }
+                        Button("Copy Line") { AppModel.copy("[\(Format.offset(item.start, from: origin))] \(item.text)") }
+                    }
             }
             .onChange(of: current) { _, id in
                 if follow, model.player.isPlaying, let id { withAnimation { proxy.scrollTo(id, anchor: .center) } }
@@ -271,8 +294,9 @@ struct TranscriptView: View {
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Toggle("Follow playback", isOn: $follow).toggleStyle(.checkbox)
+                Toggle("Flagged only", isOn: $onlyFlagged).toggleStyle(.checkbox).disabled(detail.flags.isEmpty && !onlyFlagged)
                 Spacer()
-                Text("Double-click a line to play it.").foregroundStyle(.secondary)
+                Text("Double-click a line to play it. Right-click to flag it.").foregroundStyle(.secondary)
             }
             .font(.caption).padding(8).background(.bar)
         }
@@ -289,9 +313,11 @@ struct TranscriptRow: View {
     let item: TranscriptItem
     let origin: Date?
     let isCurrent: Bool
+    var flag: Flag?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
+            FlagIcon(flag: flag)
             TimeButton(date: item.start, origin: origin).frame(width: 56, alignment: .leading)
             Text(speaker).font(.caption.weight(.semibold)).foregroundStyle(color).frame(width: 64, alignment: .leading)
             VStack(alignment: .leading, spacing: 3) {
@@ -304,7 +330,7 @@ struct TranscriptRow: View {
             }
         }
         .padding(.vertical, 2)
-        .listRowBackground(isCurrent ? Color.accentColor.opacity(0.15) : (item.e2eLatencyMs ?? 0) >= SessionInsights.slowTurnMs ? Color.orange.opacity(0.08) : nil)
+        .listRowBackground(isCurrent ? Color.accentColor.opacity(0.15) : flag != nil ? Flag.color.opacity(0.22) : (item.e2eLatencyMs ?? 0) >= SessionInsights.slowTurnMs ? Color.orange.opacity(0.08) : nil)
     }
 
     private var speaker: String {
@@ -336,18 +362,21 @@ struct LogsView: View {
     @State private var minimum: LogLevel = .info
     @State private var search = ""
     @State private var selected: Set<LogRecord.ID> = []
+    @State private var onlyFlagged = false
 
     var body: some View {
-        let records = detail.logs.filter { $0.level >= minimum && (search.isEmpty || $0.message.localizedCaseInsensitiveContains(search) || $0.logger.localizedCaseInsensitiveContains(search)) }
+        let records = detail.logs.filter { (!onlyFlagged || detail.flag(for: $0) != nil) && $0.level >= minimum && (search.isEmpty || $0.message.localizedCaseInsensitiveContains(search) || $0.logger.localizedCaseInsensitiveContains(search)) }
         VStack(spacing: 0) {
             HStack {
                 Picker("Level", selection: $minimum) { ForEach(LogLevel.allCases, id: \.self) { Text("\($0.label)+").tag($0) } }.frame(width: 160)
                 TextField("Filter", text: $search).textFieldStyle(.roundedBorder)
+                Toggle("Flagged only", isOn: $onlyFlagged).toggleStyle(.checkbox).disabled(detail.flags.isEmpty && !onlyFlagged)
                 Text("\(records.count) of \(detail.logs.count)").font(.caption).foregroundStyle(.secondary)
             }
             .padding(8)
             HSplitView {
                 Table(records, selection: $selected) {
+                    TableColumn("") { r in FlagIcon(flag: detail.flag(for: r)) }.width(14)
                     TableColumn("Time") { r in TimeButton(date: r.timestamp, origin: origin) }.width(60)
                     TableColumn("Level") { r in Text(r.level.label).foregroundStyle(color(r.level)) }.width(50)
                     TableColumn("Logger") { r in Text(r.logger).foregroundStyle(.secondary) }.width(min: 80, ideal: 140)
@@ -356,13 +385,24 @@ struct LogsView: View {
                 .contextMenu(forSelectionType: LogRecord.ID.self) { ids in
                     Button(ids.count > 1 ? "Copy \(ids.count) Lines" : "Copy") { copy(ids, from: records) }
                     Button("Copy Message Only") { AppModel.copy(records.filter { ids.contains($0.id) }.map(\.message).joined(separator: "\n")) }
+                    if ids.count == 1, let record = records.first(where: { ids.contains($0.id) }), let time = record.timestamp {
+                        Divider()
+                        FlagMenuItems(detail: detail, existing: detail.flag(for: record), title: "Flag This Moment") {
+                            detail.addFlag(at: time, wholeTurn: false)
+                        }
+                    }
                 }
                 .onCopyCommand { copy(selected, from: records); return [] }
-                .frame(minWidth: 340, idealWidth: 560, maxWidth: .infinity)
+                .frame(minWidth: 340, idealWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
                 .layoutPriority(1)
-                if selected.count == 1, let record = detail.logs.first(where: { selected.contains($0.id) }) {
-                    AttributesView(title: record.message, attributes: record.attributes).frame(minWidth: 220, idealWidth: 300, maxWidth: 480)
+                Group {
+                    if selected.count == 1, let record = detail.logs.first(where: { selected.contains($0.id) }) {
+                        AttributesView(title: record.message, attributes: record.attributes)
+                    } else {
+                        SelectionHint(text: selected.isEmpty ? "Select a line to see its attributes." : "\(selected.count) lines selected.")
+                    }
                 }
+                .frame(minWidth: 220, idealWidth: 300, maxWidth: 480, maxHeight: .infinity)
             }
         }
     }
@@ -423,33 +463,71 @@ struct TracesView: View {
     @State private var selected: Span.ID?
 
     var body: some View {
-        let roots = SpanNode.tree(detail.spans)
-        let start = detail.spans.compactMap(\.start).min()
-        let end = detail.spans.compactMap(\.end).max()
-        let total = max((end ?? .now).timeIntervalSince(start ?? .now), 0.001)
         HSplitView {
-            List(roots, children: \.children, selection: $selected) { node in
-                HStack {
-                    Image(systemName: node.span.failed ? "xmark.octagon.fill" : "circle.fill").font(.system(size: 6)).foregroundStyle(node.span.failed ? .red : .secondary)
-                    Text(node.span.name).lineLimit(1)
-                    Spacer()
-                    TimelineBar(start: node.span.start, duration: node.span.duration, origin: start, total: total).frame(minWidth: 60, maxWidth: 180).frame(height: 8)
-                    Text(node.span.duration.map { $0 < 1 ? "\(Int($0 * 1000)) ms" : String(format: "%.2f s", $0) } ?? "–")
-                        .font(.caption.monospacedDigit()).foregroundStyle((node.span.duration ?? 0) >= 2 ? .orange : .secondary).frame(width: 64, alignment: .trailing)
+            // The tree is its own view, rebuilt only when the spans or flags change. Rebuilding it on every
+            // selection made the outline view reload and jump away from the row that was clicked.
+            SpanTree(detail: detail, spans: detail.spans, flags: detail.flags, selected: $selected)
+                .equatable()
+                .frame(minWidth: 340, idealWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
+            // Always present, so selecting the first span does not add a pane and rebuild the split view.
+            Group {
+                if let span = detail.spans.first(where: { $0.id == selected }) {
+                    VStack(alignment: .leading) {
+                        HStack { Text("Starts"); TimeButton(date: span.start, origin: origin) }.font(.caption).padding([.top, .horizontal])
+                        AttributesView(title: span.statusMessage.isEmpty ? span.name : "\(span.name): \(span.statusMessage)", attributes: span.attributes)
+                    }
+                } else {
+                    SelectionHint(text: "Select a span to see its attributes.")
                 }
-                .tag(node.id)
             }
-            .frame(minWidth: 340, idealWidth: 560, maxWidth: .infinity)
-            .layoutPriority(1)
-            if let span = detail.spans.first(where: { $0.id == selected }) {
-                VStack(alignment: .leading) {
-                    HStack { Text("Starts"); TimeButton(date: span.start, origin: origin) }.font(.caption).padding([.top, .horizontal])
-                    AttributesView(title: span.statusMessage.isEmpty ? span.name : "\(span.name): \(span.statusMessage)", attributes: span.attributes)
+            .frame(minWidth: 220, idealWidth: 320, maxWidth: 480, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay { if detail.spans.isEmpty { ContentUnavailableView("No trace spans", systemImage: "point.3.connected.trianglepath.dotted") } }
+    }
+}
+
+/// The span tree. Equal when its spans and flags are, so a new selection does not rebuild it.
+private struct SpanTree: View, Equatable {
+    let detail: SessionDetail
+    let spans: [Span]
+    let flags: [Flag]
+    @Binding var selected: Span.ID?
+
+    static func == (a: SpanTree, b: SpanTree) -> Bool { a.detail === b.detail && a.spans == b.spans && a.flags == b.flags }
+
+    var body: some View {
+        let roots = SpanNode.tree(spans)
+        let start = spans.compactMap(\.start).min()
+        let end = spans.compactMap(\.end).max()
+        let total = max((end ?? .now).timeIntervalSince(start ?? .now), 0.001)
+        let marked = detail.flaggedSpans()
+        List(roots, children: \.children, selection: $selected) { node in
+            let flag = marked.flagged.contains(node.id) ? detail.flag(for: node.span) : nil
+            HStack {
+                Image(systemName: node.span.failed ? "xmark.octagon.fill" : "circle.fill").font(.system(size: 6)).foregroundStyle(node.span.failed ? .red : .secondary)
+                Text(node.span.name).lineLimit(1)
+                if flag != nil {
+                    FlagIcon(flag: flag)
+                } else if marked.ancestors.contains(node.id) {
+                    Image(systemName: "flag").font(.caption2).foregroundStyle(Flag.color).help("Contains flagged spans")
                 }
-                .frame(minWidth: 220, idealWidth: 320, maxWidth: 480)
+                Spacer()
+                TimelineBar(start: node.span.start, duration: node.span.duration, origin: start, total: total).frame(minWidth: 60, maxWidth: 180).frame(height: 8)
+                Text(node.span.duration.map { $0 < 1 ? "\(Int($0 * 1000)) ms" : String(format: "%.2f s", $0) } ?? "–")
+                    .font(.caption.monospacedDigit()).foregroundStyle((node.span.duration ?? 0) >= 2 ? .orange : .secondary).frame(width: 64, alignment: .trailing)
+            }
+            .tag(node.id)
+            .listRowBackground(flag != nil ? Flag.color.opacity(0.22) : nil)
+            .contextMenu {
+                if let spanStart = node.span.start {
+                    FlagMenuItems(detail: detail, existing: flag, title: "Flag This Span") {
+                        detail.addFlag(from: spanStart, to: node.span.end ?? spanStart, note: node.span.name)
+                    }
+                }
             }
         }
-        .overlay { if detail.spans.isEmpty { ContentUnavailableView("No trace spans", systemImage: "point.3.connected.trianglepath.dotted") } }
     }
 }
 
@@ -519,12 +597,14 @@ struct MetricsView: View {
 struct FindingRow: View {
     let time: TimeButton
     let text: String
+    var flag: Flag?
     let copy: () -> Void
     @State private var hovering = false
     @State private var copied = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
+            FlagIcon(flag: flag)
             time.frame(width: 56, alignment: .leading)
             Text(text).lineLimit(3).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
             Button {
@@ -538,5 +618,107 @@ struct FindingRow: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .contextMenu { Button("Copy", action: copy) }
+    }
+}
+
+// MARK: Flags
+
+extension Flag {
+    static let color = Color.yellow
+}
+
+/// A flag beside a flagged row, with the flag's note as its tooltip; blank space otherwise so rows line up.
+struct FlagIcon: View {
+    let flag: Flag?
+    var body: some View {
+        Image(systemName: "flag.fill").font(.caption).foregroundStyle(Flag.color)
+            .opacity(flag == nil ? 0 : 1)
+            .help(flag.map { $0.note.isEmpty ? "Flagged" : $0.note } ?? "")
+            .accessibilityHidden(flag == nil)
+            .accessibilityLabel(flag.map { "Flagged: \($0.note)" } ?? "")
+    }
+}
+
+/// Context-menu items that flag something, or edit or remove the flag it already has.
+struct FlagMenuItems: View {
+    let detail: SessionDetail
+    let existing: Flag?
+    let title: String
+    let add: () -> Flag
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if let existing {
+            Button("Edit Flag Note…") { model.renamingFlag = existing.id }
+            Button("Remove Flag") { detail.removeFlag(existing.id) }
+        } else {
+            Button(title) { model.renamingFlag = add().id }
+        }
+    }
+}
+
+/// The toolbar's list of flags: choosing one moves the playhead there.
+struct FlagsMenu: View {
+    let detail: SessionDetail
+    let origin: Date?
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Menu {
+            Button("Flag Playhead") { model.flagPlayhead() }.disabled(model.player.currentDate == nil)
+            if !detail.flags.isEmpty {
+                Section("Go to") {
+                    ForEach(detail.flags) { flag in
+                        Button("\(Format.offset(flag.start, from: origin))  \(flag.note.isEmpty ? "Flag" : flag.note)") { model.player.play(at: flag.start, leadIn: 0.5) }
+                    }
+                }
+                Divider()
+                Button("Remove All Flags", role: .destructive) { for flag in detail.flags { detail.removeFlag(flag.id) } }
+            }
+        } label: {
+            Label(detail.flags.isEmpty ? "Flags" : "Flags (\(detail.flags.count))", systemImage: detail.flags.isEmpty ? "flag" : "flag.fill")
+        }
+        .help("Flag a moment to highlight it in every view (⌥M flags the playhead; right-click in any view)")
+    }
+}
+
+/// The session's flags at the top of the overview.
+struct FlagsBox: View {
+    let detail: SessionDetail
+    let origin: Date?
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(detail.flags) { flag in
+                    HStack(alignment: .firstTextBaseline) {
+                        Image(systemName: "flag.fill").font(.caption).foregroundStyle(Flag.color)
+                        TimeButton(date: flag.start, origin: origin).frame(width: 56, alignment: .leading)
+                        Text(flag.note.isEmpty ? "No note" : flag.note).foregroundStyle(flag.note.isEmpty ? .secondary : .primary)
+                            .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                        Text(String(format: "%.1f s", flag.end.timeIntervalSince(flag.start))).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                    .contextMenu {
+                        Button("Edit Flag Note…") { model.renamingFlag = flag.id }
+                        Button("Remove Flag") { detail.removeFlag(flag.id) }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            HStack { Text("Flagged").font(.headline); Text("\(detail.flags.count)").font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+}
+
+/// A quiet note in an empty side pane. Unlike ContentUnavailableView it has no large ideal size,
+/// which pushed the split view wider than the window.
+struct SelectionHint: View {
+    let text: String
+    var body: some View {
+        Text(text).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            .padding().frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
     }
 }

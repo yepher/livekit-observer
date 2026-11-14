@@ -47,7 +47,8 @@ struct SessionInsights: Sendable {
 
 /// A Markdown digest of a session to paste into a coding agent while improving the agent.
 enum SessionReport {
-    static func markdown(row: SessionRow, transcript: [TranscriptItem], insights: SessionInsights, origin: Date?) -> String {
+    static func markdown(row: SessionRow, transcript: [TranscriptItem], insights: SessionInsights, origin: Date?,
+                         flags: [Flag] = [], logs: [LogRecord] = [], spans: [Span] = []) -> String {
         func clock(_ d: Date?) -> String { Format.offset(d, from: origin) }
         func ms(_ s: SessionInsights.Stat?) -> String {
             s.map { "median \(Int($0.median)) ms, p95 \(Int($0.p95)) ms, max \(Int($0.max)) ms (n=\($0.count))" } ?? "n/a"
@@ -65,6 +66,23 @@ enum SessionReport {
         - User end-of-turn delay: \(ms(insights.endOfTurn))
 
         """
+        if !flags.isEmpty {
+            out += "## Flagged by the reviewer (\(flags.count))\n"
+            for flag in flags {
+                out += "\n### [\(clock(flag.start))–\(clock(flag.end))] \(flag.note.isEmpty ? "Flag" : flag.note)\n"
+                for item in transcript where flag.overlaps(from: item.start, to: item.stoppedSpeakingAt) {
+                    out += "- \(item.role == .agent ? "AGENT" : item.role == .user ? "USER" : item.kind.uppercased()) [\(clock(item.start))]: \(item.text)\n"
+                }
+                let flaggedLogs = logs.filter { flag.covers($0.timestamp) }
+                for log in flaggedLogs.prefix(30) { out += "- log [\(clock(log.timestamp))] \(log.level.label.uppercased()) \(log.logger): \(log.message)\n" }
+                if flaggedLogs.count > 30 { out += "- …and \(flaggedLogs.count - 30) more log lines\n" }
+                for span in spans.filter(flag.marks).sorted(by: { ($0.start ?? .distantPast) < ($1.start ?? .distantPast) }).prefix(30) {
+                    let duration = span.duration.map { String(format: "%.2f s", $0) } ?? "?"
+                    out += "- span [\(clock(span.start))] \(span.name) \(duration)\(span.failed ? " FAILED \(span.statusMessage)" : "")\n"
+                }
+            }
+            out += "\n"
+        }
         if !insights.problems.isEmpty {
             out += "## Warnings and errors (\(insights.problems.count))\n"
             for log in insights.problems.prefix(40) { out += "- [\(clock(log.timestamp))] \(log.level.label.uppercased()) \(log.logger): \(log.message)\n" }
@@ -77,7 +95,8 @@ enum SessionReport {
             if let e = item.e2eLatencyMs { notes.append("e2e \(Int(e)) ms") }
             if let c = item.confidence { notes.append(String(format: "conf %.2f", c)) }
             if item.interrupted { notes.append("interrupted") }
-            out += "[\(clock(item.start))] \(who): \(item.text)\(notes.isEmpty ? "" : "  _(\(notes.joined(separator: ", ")))_")\n"
+            let flagged = flags.contains { $0.overlaps(from: item.start, to: item.stoppedSpeakingAt) } ? "⚑ " : ""
+            out += "\(flagged)[\(clock(item.start))] \(who): \(item.text)\(notes.isEmpty ? "" : "  _(\(notes.joined(separator: ", ")))_")\n"
         }
         return out
     }

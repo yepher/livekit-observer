@@ -95,7 +95,7 @@ struct SpectrogramView: View {
     }
 
     private var legend: some View {
-        Text("Mel scale \(Int(Spectrogram.minHz)) Hz–\(Int(Spectrogram.maxHz / 1000)) kHz · \(Int(Spectrogram.floorDB)) to \(Int(Spectrogram.ceilingDB)) dBFS · hover to skim (⌥S toggles) · click to move the playhead · drag to scroll")
+        Text("Mel scale \(Int(Spectrogram.minHz)) Hz–\(Int(Spectrogram.maxHz / 1000)) kHz · \(Int(Spectrogram.floorDB)) to \(Int(Spectrogram.ceilingDB)) dBFS · hover to skim (⌥S toggles) · click to move the playhead · drag to scroll · right-click to flag")
             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 
@@ -181,10 +181,10 @@ private struct SourceLanes: View {
             }
             if let spectrogram = detail.spectrograms[source.kind] {
                 ForEach(0..<spectrogram.channels.count, id: \.self) { channel in
-                    Lane(spectrogram: spectrogram, channel: channel, file: source.file, start: start, window: window, pinch: pinch, anchor: anchor, canScroll: canScroll, scrollStart: $scrollStart, label: source.channelName(channel, of: spectrogram.channels.count, identical: spectrogram.identicalChannels))
+                    Lane(detail: detail, spectrogram: spectrogram, channel: channel, file: source.file, start: start, window: window, pinch: pinch, anchor: anchor, canScroll: canScroll, scrollStart: $scrollStart, label: source.channelName(channel, of: spectrogram.channels.count, identical: spectrogram.identicalChannels))
                         .frame(minHeight: 60, maxHeight: .infinity)
                 }
-                TimeAxis(window: window, origin: origin, transcript: detail.transcript).frame(height: 22)
+                TimeAxis(window: window, origin: origin, transcript: detail.transcript, flags: detail.flags).frame(height: 22)
             } else if let error = detail.spectrogramErrors[source.kind] {
                 Label(error, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
                 Spacer()
@@ -232,6 +232,7 @@ private struct SourceLanes: View {
 
 /// One channel's spectrogram for the visible window, with frequency labels, the playhead, and click-to-seek.
 private struct Lane: View {
+    let detail: SessionDetail
     let spectrogram: Spectrogram
     let channel: Int
     /// The recording, for skimming.
@@ -250,6 +251,8 @@ private struct Lane: View {
     @State private var image: CGImage?
     /// When a drag began: the view's left edge, or the playhead and whether it was playing.
     @State private var drag: (edge: Date, time: TimeInterval, wasPlaying: Bool)?
+    /// Where the pointer is, for the context menu, which SwiftUI gives no location.
+    @State private var pointer: Date?
 
     private struct Key: Hashable { let from: TimeInterval; let to: TimeInterval; let columns: Int }
 
@@ -265,6 +268,7 @@ private struct Lane: View {
                     Image(decorative: image, scale: 1).resizable().interpolation(.medium)
                         .scaleEffect(x: pinch, y: 1, anchor: UnitPoint(x: anchor, y: 0.5))
                 }
+                FlagBands(flags: detail.flags, window: window, width: geo.size.width)
                 frequencyLabels(size: geo.size)
                 Text(label).font(.caption.weight(.semibold)).foregroundStyle(.white)
                     .padding(.horizontal, 5).padding(.vertical, 2).background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
@@ -305,12 +309,32 @@ private struct Lane: View {
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let location) where drag == nil:
+                    pointer = date(at: location.x, width: geo.size.width)
                     model.skimmer.move(to: date(at: location.x, width: geo.size.width), url: file, origin: start, audible: !model.player.isPlaying)
                 case .active: break
                 case .ended: model.skimmer.end()
                 }
             }
+            .contextMenu { flagMenu }
             .task(id: key) { image = spectrogram.image(channel: channel, from: key.from, to: key.to, columns: key.columns) }
+        }
+    }
+
+    /// Flag the turn under the pointer, or just the moment; or edit the flag already there.
+    @ViewBuilder private var flagMenu: some View {
+        if let pointer {
+            if let flag = detail.flag(at: pointer), flag.start.addingTimeInterval(-Flag.slack) <= pointer {
+                Text(flag.note.isEmpty ? "Flagged" : flag.note)
+                Button("Edit Flag Note…") { model.renamingFlag = flag.id }
+                Button("Remove Flag") { detail.removeFlag(flag.id) }
+            } else {
+                if let turn = detail.turn(at: pointer) {
+                    Button("Flag “\(turn.text.count > 30 ? turn.text.prefix(29) + "…" : Substring(turn.text))”") { model.renamingFlag = detail.addFlag(at: pointer).id }
+                }
+                Button("Flag This Moment") { model.renamingFlag = detail.addFlag(at: pointer, wholeTurn: false).id }
+            }
+            Divider()
+            Button("Move Playhead Here") { if let t = model.player.offset(for: pointer) { model.player.seek(to: t) } }
         }
     }
 
@@ -354,12 +378,17 @@ private struct TimeAxis: View {
     let window: ClosedRange<Date>
     let origin: Date?
     let transcript: [TranscriptItem]
+    let flags: [Flag]
 
     var body: some View {
         Canvas { context, size in
             let span = window.upperBound.timeIntervalSince(window.lowerBound)
             guard span > 0 else { return }
             func x(_ date: Date) -> CGFloat { size.width * date.timeIntervalSince(window.lowerBound) / span }
+            for flag in flags where flag.end >= window.lowerBound && flag.start <= window.upperBound {
+                let left = max(x(flag.start), 0), right = min(x(flag.end), size.width)
+                context.fill(Path(CGRect(x: left, y: 0, width: max(right - left, 2), height: 3)), with: .color(Flag.color))
+            }
             for item in transcript where item.role == .agent || item.role == .user {
                 guard let start = item.start, window.contains(start) else { continue }
                 context.fill(Path(CGRect(x: x(start) - 1, y: 0, width: 2, height: 6)), with: .color(item.role == .agent ? .blue : .green))
@@ -390,5 +419,31 @@ private struct Skimline: View {
                 .offset(x: width * date.timeIntervalSince(window.lowerBound) / span)
                 .allowsHitTesting(false)
         }
+    }
+}
+
+/// Flagged stretches, shaded over the spectrogram with a bar along the top.
+private struct FlagBands: View {
+    let flags: [Flag]
+    let window: ClosedRange<Date>
+    let width: CGFloat
+
+    var body: some View {
+        let span = window.upperBound.timeIntervalSince(window.lowerBound)
+        ZStack(alignment: .topLeading) {
+            ForEach(flags.filter { $0.end >= window.lowerBound && $0.start <= window.upperBound }) { flag in
+                let left = max(width * flag.start.timeIntervalSince(window.lowerBound) / span, 0)
+                let right = min(width * flag.end.timeIntervalSince(window.lowerBound) / span, width)
+                VStack(spacing: 0) {
+                    Rectangle().fill(Flag.color).frame(height: 3)
+                    Rectangle().fill(Flag.color.opacity(0.18))
+                        .overlay(alignment: .leading) { Rectangle().fill(Flag.color.opacity(0.8)).frame(width: 1) }
+                }
+                .frame(width: max(right - left, 2))
+                .offset(x: left)
+                .help(flag.note.isEmpty ? "Flagged" : flag.note)
+            }
+        }
+        .allowsHitTesting(false)
     }
 }

@@ -10,16 +10,21 @@ struct LiveKitObserverApp: App {
                 .environment(model)
                 .frame(minWidth: 1000, minHeight: 640)
                 .task { await model.refresh() }
+                .onAppear { model.handleSpaceBar() }
         }
         .commands {
             CommandMenu("Playback") {
-                Button(model.player.isPlaying ? "Pause" : "Play") { model.player.toggle() }
-                    .keyboardShortcut(.space, modifiers: [])
+                // Space is handled by AppModel.handleSpaceBar, so focused lists and buttons cannot swallow it
+                // and text fields still get it.
+                Button(model.player.isPlaying ? "Pause (Space)" : "Play (Space)") { model.player.toggle() }
                     .disabled(!model.player.isLoaded)
                 Button("Back 10 Seconds") { model.player.skip(-10) }.keyboardShortcut(.leftArrow, modifiers: .command)
                 Button("Forward 10 Seconds") { model.player.skip(10) }.keyboardShortcut(.rightArrow, modifiers: .command)
                 Divider()
                 Toggle("Skimming", isOn: Bindable(model.skimmer).isEnabled).keyboardShortcut("s", modifiers: .option)
+                Divider()
+                Button("Flag Playhead") { model.flagPlayhead() }.keyboardShortcut("m", modifiers: .option)
+                    .disabled(model.detail == nil || model.player.currentDate == nil)
             }
             CommandGroup(after: .toolbar) {
                 Button("Refresh Sessions") { Task { await model.refresh() } }.keyboardShortcut("r")

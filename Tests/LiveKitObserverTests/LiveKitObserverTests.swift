@@ -263,3 +263,28 @@ private func json(_ text: String) throws -> JSONValue { try JSONValue.parse(Data
         #expect(try Spectrogram.compute(file: speech).startOffset(from: Spectrogram.compute(file: tones), expected: 0) == nil)
     }
 }
+
+@Suite struct FlagTests {
+    let t0 = Date(timeIntervalSince1970: 1_794_665_497)
+    var flag: Flag { Flag(start: t0, end: t0.addingTimeInterval(9.4), note: "Ma came out as static") }
+
+    private func span(_ id: String, from: TimeInterval, to: TimeInterval) throws -> Span {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return Span(json: try json(#"{"spanId":"\#(id)","name":"\#(id)","startTime":"\#(iso.string(from: t0.addingTimeInterval(from)))","endTime":"\#(iso.string(from: t0.addingTimeInterval(to)))"}"#), index: 0)
+    }
+
+    @Test func coversLogLinesInsideWithALittleSlack() {
+        #expect(flag.covers(t0.addingTimeInterval(4)))
+        #expect(flag.covers(t0.addingTimeInterval(-0.3)))
+        #expect(!flag.covers(t0.addingTimeInterval(11)))
+        #expect(!flag.covers(nil))
+    }
+
+    @Test func marksSpansInsideButNotTheSessionAroundIt() throws {
+        #expect(flag.marks(try span("tts_request", from: 0.1, to: 1.4)))
+        #expect(flag.marks(try span("agent_turn", from: -0.2, to: 9.2)))
+        #expect(!flag.marks(try span("agent_session", from: -300, to: 200)))
+        #expect(!flag.marks(try span("next_turn", from: 20, to: 22)))
+    }
+}
