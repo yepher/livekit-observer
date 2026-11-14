@@ -20,6 +20,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.yepher.livekit-observer
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: LiveKit Observer
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         # A local developer tool: it runs `lk` and reads the Keychain, so it is not sandboxed.
         ENABLE_APP_SANDBOX: NO

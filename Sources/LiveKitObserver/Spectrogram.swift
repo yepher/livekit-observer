@@ -118,28 +118,50 @@ struct Spectrogram: Sendable {
     }
 
     /// How many seconds after `other` this recording starts, found by matching their loudness over time.
-    /// Searches `expected ± range` seconds; nil when the recordings do not clearly match.
-    func startOffset(from other: Spectrogram, expected: TimeInterval, range: TimeInterval = 3) -> TimeInterval? {
+    /// Searches `expected ± range` seconds, coarsely at first when the range is wide; nil when the recordings do not clearly match.
+    func startOffset(from other: Spectrogram, expected: TimeInterval, range: TimeInterval = 120) -> TimeInterval? {
         guard abs(hop - other.hop) < 1e-9 else { return nil }
         let a = envelope, b = other.envelope
+        // Short overlaps match by chance, so require a good share of the shorter recording.
+        let minimumOverlap = max(100, min(a.count, b.count) / 4)
         let center = Int((expected / hop).rounded()), reach = Int(range / hop)
-        var best: (lag: Int, score: Float) = (0, -.infinity)
-        for lag in (center - reach)...(center + reach) {
-            // This recording's frame i is the other's frame i + lag.
-            let i0 = max(0, -lag), i1 = min(a.count, b.count - lag)
-            guard i1 - i0 > 100 else { continue }
-            var dot: Float = 0, aa: Float = 0, bb: Float = 0
-            a.withUnsafeBufferPointer { pa in
-                b.withUnsafeBufferPointer { pb in
-                    vDSP_dotpr(pa.baseAddress! + i0, 1, pb.baseAddress! + i0 + lag, 1, &dot, vDSP_Length(i1 - i0))
-                    vDSP_svesq(pa.baseAddress! + i0, 1, &aa, vDSP_Length(i1 - i0))
-                    vDSP_svesq(pb.baseAddress! + i0 + lag, 1, &bb, vDSP_Length(i1 - i0))
+        var guess = center, near = reach
+        if reach > 300 {
+            let step = 10
+            let coarse = Self.bestLag(Self.decimate(a, by: step), Self.decimate(b, by: step),
+                                      lags: (center - reach) / step...(center + reach) / step, minimumOverlap: minimumOverlap / step)
+            guard let coarse, coarse.score >= 0.5 else { return nil }
+            guess = coarse.lag * step
+            near = 2 * step
+        }
+        guard let best = Self.bestLag(a, b, lags: (guess - near)...(guess + near), minimumOverlap: minimumOverlap),
+              best.score >= 0.5 else { return nil }
+        return Double(best.lag) * hop
+    }
+
+    /// The lag with the highest normalized correlation, where `a`'s frame i is `b`'s frame i + lag.
+    private static func bestLag(_ a: [Float], _ b: [Float], lags: ClosedRange<Int>, minimumOverlap: Int) -> (lag: Int, score: Float)? {
+        var best: (lag: Int, score: Float)?
+        a.withUnsafeBufferPointer { pa in
+            b.withUnsafeBufferPointer { pb in
+                for lag in lags {
+                    let i0 = max(0, -lag), i1 = min(a.count, b.count - lag)
+                    guard i1 - i0 >= max(minimumOverlap, 2) else { continue }
+                    var dot: Float = 0, aa: Float = 0, bb: Float = 0
+                    let n = vDSP_Length(i1 - i0)
+                    vDSP_dotpr(pa.baseAddress! + i0, 1, pb.baseAddress! + i0 + lag, 1, &dot, n)
+                    vDSP_svesq(pa.baseAddress! + i0, 1, &aa, n)
+                    vDSP_svesq(pb.baseAddress! + i0 + lag, 1, &bb, n)
+                    let score = dot / max(sqrt(aa * bb), 1e-9)
+                    if score > (best?.score ?? -.infinity) { best = (lag, score) }
                 }
             }
-            let score = dot / max(sqrt(aa * bb), 1e-9)
-            if score > best.score { best = (lag, score) }
         }
-        return best.score >= 0.5 ? Double(best.lag) * hop : nil
+        return best
+    }
+
+    private static func decimate(_ values: [Float], by step: Int) -> [Float] {
+        stride(from: 0, to: values.count - step + 1, by: step).map { values[$0..<$0 + step].reduce(0, +) }
     }
 
     /// The center frequency of each band, lowest first.

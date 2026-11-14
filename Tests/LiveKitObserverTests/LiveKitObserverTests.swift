@@ -241,6 +241,15 @@ private func json(_ text: String) throws -> JSONValue { try JSONValue.parse(Data
         #expect(abs(offset - 0.75) <= 0.011)
     }
 
+    @Test func findsTheStartOffsetFarFromTheReportedOne() throws {
+        let early = try bursts(delay: 0), late = try bursts(delay: 0.75)
+        defer { try? FileManager.default.removeItem(at: early); try? FileManager.default.removeItem(at: late) }
+        let a = try Spectrogram.compute(file: early), b = try Spectrogram.compute(file: late)
+        // The clocks disagree by about 25 s, as egress and LiveKit's recording can.
+        let offset = try #require(a.startOffset(from: b, expected: -25, range: 60))
+        #expect(abs(offset - 0.75) <= 0.011)
+    }
+
     @Test func refusesToAlignUnrelatedRecordings() throws {
         let tones = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).wav")
         let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!

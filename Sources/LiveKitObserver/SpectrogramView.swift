@@ -10,6 +10,8 @@ struct SpectrogramView: View {
     @AppStorage("spectrogramSpan") private var span: Double = 30
     /// The pinch in progress; the image is stretched live and rebuilt when the pinch ends.
     @GestureState private var pinch: CGFloat = 1
+    /// The left edge of the zoomed view once it has been placed; nil puts the playhead a quarter of the way in.
+    @State private var scrollStart: Date?
     static let shortestSpan: TimeInterval = 2
 
     enum Layout: String, CaseIterable, Identifiable {
@@ -35,7 +37,7 @@ struct SpectrogramView: View {
             } else {
                 let window = window
                 let groups = ForEach(detail.sources) { source in
-                    SourceLanes(detail: detail, source: source, window: window, origin: origin, pinch: pinch, anchor: anchor(in: window))
+                    SourceLanes(detail: detail, source: source, window: window, origin: origin, pinch: pinch, anchor: anchor(in: window), canScroll: window != wholeWindow, scrollStart: $scrollStart)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 Group {
@@ -44,33 +46,62 @@ struct SpectrogramView: View {
                 .simultaneousGesture(
                     MagnifyGesture()
                         .updating($pinch) { value, state, _ in state = value.magnification }
-                        .onEnded { span = zoomed(by: $0.magnification) }
+                        .onEnded { value in
+                            // Keep the moment under the pinch's anchor where it was.
+                            let old = window, fraction = anchor(in: old)
+                            let pivot = old.lowerBound.addingTimeInterval(old.upperBound.timeIntervalSince(old.lowerBound) * fraction)
+                            span = zoomed(by: value.magnification)
+                            scrollStart = span > 0 ? pivot.addingTimeInterval(-span * fraction) : nil
+                        }
                 )
             }
         }
         .padding([.horizontal, .bottom])
         .task(id: detail.sources.map(\.id)) { await model.analyze(detail) }
+        .onChange(of: model.player.currentTime) { old, new in follow(from: old, to: new) }
+        .onChange(of: detail.row.id) { scrollStart = nil }
     }
 
+    /// The pickers and the scale legend share a row when they fit; otherwise the legend gets its own line.
     private var controls: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack { pickers; Spacer(minLength: 12); legend }
+            VStack(alignment: .leading, spacing: 6) {
+                ViewThatFits(in: .horizontal) {
+                    HStack { pickers; Spacer(minLength: 0) }
+                    VStack(alignment: .leading, spacing: 6) { layoutPicker; HStack { zoomPicker; Spacer(minLength: 0) } }
+                }
+                legend.lineLimit(2)
+            }
+        }
+    }
+
+    @ViewBuilder private var pickers: some View { layoutPicker; zoomPicker }
+
+    private var layoutPicker: some View {
+        Picker("Layout", selection: $layout) { ForEach(Layout.allCases) { Text($0.rawValue).tag($0) } }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+    }
+
+    private var zoomPicker: some View {
         HStack {
-            Picker("Layout", selection: $layout) { ForEach(Layout.allCases) { Text($0.rawValue).tag($0) } }
-                .pickerStyle(.segmented).labelsHidden().fixedSize()
             Picker("Zoom", selection: preset) { ForEach(Zoom.allCases) { Text($0.label).tag(Optional($0)) } }
                 .pickerStyle(.segmented).labelsHidden().fixedSize()
                 .help("Pinch on the spectrogram to zoom in or out")
             if preset.wrappedValue == nil {
-                Text(Format.duration(span)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Text(Format.duration(span)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
             }
-            Spacer()
-            Text("Mel scale \(Int(Spectrogram.minHz)) Hz–\(Int(Spectrogram.maxHz / 1000)) kHz · \(Int(Spectrogram.floorDB)) to \(Int(Spectrogram.ceilingDB)) dBFS · click to play from there")
-                .font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    private var legend: some View {
+        Text("Mel scale \(Int(Spectrogram.minHz)) Hz–\(Int(Spectrogram.maxHz / 1000)) kHz · \(Int(Spectrogram.floorDB)) to \(Int(Spectrogram.ceilingDB)) dBFS · hover to skim (⌥S toggles) · click to move the playhead · drag to scroll")
+            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 
     /// The preset matching the current span, or nil after a pinch to an in-between zoom.
     private var preset: Binding<Zoom?> {
-        Binding(get: { Zoom.allCases.first { $0.seconds == span } }, set: { if let zoom = $0 { span = zoom.seconds } })
+        Binding(get: { Zoom.allCases.first { $0.seconds == span } }, set: { if let zoom = $0 { span = zoom.seconds; scrollStart = nil } })
     }
 
     /// The span after a pinch: spreading the fingers shows less time. Zooming out past the session shows all of it.
@@ -103,9 +134,22 @@ struct SpectrogramView: View {
     private var window: ClosedRange<Date> {
         let whole = wholeWindow
         guard span > 0, span < whole.upperBound.timeIntervalSince(whole.lowerBound) else { return whole }
-        let center = model.player.currentDate ?? whole.lowerBound
-        let start = center.addingTimeInterval(-span * 0.25)
+        // Where the view was placed, or with the playhead a quarter of the way in; never past either end.
+        let wanted = scrollStart ?? (model.player.currentDate ?? whole.lowerBound).addingTimeInterval(-span * 0.25)
+        let latest = whole.upperBound.addingTimeInterval(-span)
+        let start = min(max(wanted, whole.lowerBound), latest)
         return start...start.addingTimeInterval(span)
+    }
+
+    /// Clicking only moves the playhead. The view turns the page when playback runs off its right edge,
+    /// and jumps when the playhead is moved somewhere off screen (from the transcript, say).
+    private func follow(from old: TimeInterval, to new: TimeInterval) {
+        guard span > 0, let origin = model.player.origin else { return }
+        if scrollStart == nil { scrollStart = window.lowerBound }
+        let view = window, now = origin.addingTimeInterval(new), before = origin.addingTimeInterval(old)
+        let ranOffRight = model.player.isPlaying && before < view.upperBound && now >= view.upperBound
+        let jumpedAway = !model.player.isPlaying && !view.contains(now)
+        if ranOffRight || jumpedAway { scrollStart = now.addingTimeInterval(-span * (ranOffRight ? 0.05 : 0.25)) }
     }
 }
 
@@ -117,20 +161,27 @@ private struct SourceLanes: View {
     let origin: Date?
     let pinch: CGFloat
     let anchor: CGFloat
+    let canScroll: Bool
+    @Binding var scrollStart: Date?
     @Environment(AppModel.self) private var model
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(source.title).font(.headline)
-                Text(source.detail).font(.caption).foregroundStyle(.secondary)
-                if detail.activeSource == source.kind { Tag(text: "Playing", symbol: "speaker.wave.2", color: .accentColor) }
-                Spacer()
-                if let offset = alignmentNote { Text(offset).font(.caption).foregroundStyle(.secondary) }
+                Text(source.title).font(.headline).fixedSize()
+                if detail.activeSource == source.kind { Tag(text: "Playing", symbol: "speaker.wave.2", color: .accentColor).fixedSize() }
+                Text(source.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                    .layoutPriority(-1).help(source.detail)
+                Spacer(minLength: 8)
+                if let offset = alignmentNote {
+                    Text(offset).font(.caption).foregroundStyle(detail.alignment == .noMatch ? .orange : .secondary)
+                        .lineLimit(1).truncationMode(.tail).help(offset)
+                }
+                if source.kind == .egress, detail.sources.count > 1 { alignMenu }
             }
             if let spectrogram = detail.spectrograms[source.kind] {
                 ForEach(0..<spectrogram.channels.count, id: \.self) { channel in
-                    Lane(spectrogram: spectrogram, channel: channel, start: start, window: window, pinch: pinch, anchor: anchor, label: source.channelName(channel, of: spectrogram.channels.count, identical: spectrogram.identicalChannels))
+                    Lane(spectrogram: spectrogram, channel: channel, file: source.file, start: start, window: window, pinch: pinch, anchor: anchor, canScroll: canScroll, scrollStart: $scrollStart, label: source.channelName(channel, of: spectrogram.channels.count, identical: spectrogram.identicalChannels))
                         .frame(minHeight: 60, maxHeight: .infinity)
                 }
                 TimeAxis(window: window, origin: origin, transcript: detail.transcript).frame(height: 22)
@@ -145,30 +196,60 @@ private struct SourceLanes: View {
 
     private var start: Date { detail.origin(of: source) ?? origin ?? window.lowerBound }
 
-    /// How far this recording starts from the other one, which shows whether they line up.
+    /// How far this recording starts from the other one, and how that was worked out.
     private var alignmentNote: String? {
         guard let other = detail.sources.first(where: { $0.kind != source.kind }),
               let mine = detail.origin(of: source), let theirs = detail.origin(of: other) else { return nil }
         let delta = mine.timeIntervalSince(theirs)
-        guard abs(delta) >= 0.05 else { return nil }
-        let aligned = detail.originCorrection[source.kind] != nil ? " (aligned by audio)" : ""
-        return String(format: "starts %.2f s %@ the %@ recording%@", abs(delta), delta > 0 ? "after" : "before", other.title.lowercased(), aligned)
+        let how: String = switch detail.alignment {
+        case .byAudio: "matched by audio"
+        case .byHand: "adjusted by hand"
+        case .noMatch: "audio did not match; using reported start times"
+        case .reported: "reported start times"
+        }
+        guard abs(delta) >= 0.05 else { return "lined up · \(how)" }
+        return String(format: "starts %.2f s %@ the %@ recording · %@", abs(delta), delta > 0 ? "after" : "before", other.title.lowercased(), how)
     }
+
+    /// Fixes for when matching by audio picks the wrong spot.
+    private var alignMenu: some View {
+        Menu {
+            Button("Match by Audio Again") { Task { await model.alignByAudio(detail) } }
+            Button("Use Reported Start Times") { model.resetAlignment(detail) }
+            Divider()
+            Button("Move Egress 1 s Earlier") { model.nudgeEgress(detail, by: -1) }
+            Button("Move Egress 0.1 s Earlier") { model.nudgeEgress(detail, by: -0.1) }
+            Button("Move Egress 0.1 s Later") { model.nudgeEgress(detail, by: 0.1) }
+            Button("Move Egress 1 s Later") { model.nudgeEgress(detail, by: 1) }
+        } label: {
+            Image(systemName: "arrow.left.and.right")
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help("Line the egress recording up with LiveKit's")
+    }
+
 }
 
 /// One channel's spectrogram for the visible window, with frequency labels, the playhead, and click-to-seek.
 private struct Lane: View {
     let spectrogram: Spectrogram
     let channel: Int
+    /// The recording, for skimming.
+    let file: URL
     /// The wall-clock time of the recording's first sample.
     let start: Date
     let window: ClosedRange<Date>
     let pinch: CGFloat
     let anchor: CGFloat
+    /// Whether dragging scrolls the view (zoomed in) rather than scrubbing the playhead (whole session).
+    let canScroll: Bool
+    @Binding var scrollStart: Date?
     let label: String
     @Environment(AppModel.self) private var model
     @Environment(\.displayScale) private var scale
     @State private var image: CGImage?
+    /// When a drag began: the view's left edge, or the playhead and whether it was playing.
+    @State private var drag: (edge: Date, time: TimeInterval, wasPlaying: Bool)?
 
     private struct Key: Hashable { let from: TimeInterval; let to: TimeInterval; let columns: Int }
 
@@ -189,16 +270,53 @@ private struct Lane: View {
                     .padding(.horizontal, 5).padding(.vertical, 2).background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
                     .padding(4)
                 Playhead(window: window, width: geo.size.width)
+                Skimline(window: window, width: geo.size.width)
             }
             .clipShape(RoundedRectangle(cornerRadius: 4))
             .contentShape(Rectangle())
+            .pointerStyle(drag != nil ? .grabActive : canScroll ? .grabIdle : nil)
             .onTapGesture { location in
-                let span = window.upperBound.timeIntervalSince(window.lowerBound)
-                let date = window.lowerBound.addingTimeInterval(span * location.x / max(geo.size.width, 1))
-                if let t = model.player.offset(for: date) { model.player.seek(to: t) }
+                if let t = model.player.offset(for: date(at: location.x, width: geo.size.width)) { model.player.seek(to: t) }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 3)
+                    .onChanged { value in
+                        let player = model.player
+                        if drag == nil {
+                            drag = (window.lowerBound, player.currentTime, player.isPlaying)
+                            if !canScroll { player.pause() }
+                            model.skimmer.end()
+                        }
+                        guard let drag else { return }
+                        if canScroll {
+                            // Grab and move the spectrogram, leaving the playhead where it is.
+                            let perPoint = window.upperBound.timeIntervalSince(window.lowerBound) / max(geo.size.width, 1)
+                            scrollStart = drag.edge.addingTimeInterval(-value.translation.width * perPoint)
+                        } else if let t = player.offset(for: date(at: value.location.x, width: geo.size.width)) {
+                            // The whole session is on screen, so dragging scrubs the playhead instead.
+                            player.seek(to: t)
+                        }
+                    }
+                    .onEnded { _ in
+                        if !canScroll, drag?.wasPlaying == true { model.player.play() }
+                        drag = nil
+                    }
+            )
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location) where drag == nil:
+                    model.skimmer.move(to: date(at: location.x, width: geo.size.width), url: file, origin: start, audible: !model.player.isPlaying)
+                case .active: break
+                case .ended: model.skimmer.end()
+                }
             }
             .task(id: key) { image = spectrogram.image(channel: channel, from: key.from, to: key.to, columns: key.columns) }
         }
+    }
+
+    private func date(at x: CGFloat, width: CGFloat) -> Date {
+        let span = window.upperBound.timeIntervalSince(window.lowerBound)
+        return window.lowerBound.addingTimeInterval(span * min(max(x / max(width, 1), 0), 1))
     }
 
     /// Frequency marks along the right edge.
@@ -255,6 +373,22 @@ private struct TimeAxis: View {
                 context.draw(Text(Format.offset(date, from: base)).font(.caption2.monospacedDigit()).foregroundStyle(.secondary), at: CGPoint(x: x(date), y: 16))
                 t += step
             }
+        }
+    }
+}
+
+/// The skimmer: a red line where the pointer is, in every lane.
+private struct Skimline: View {
+    let window: ClosedRange<Date>
+    let width: CGFloat
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if let date = model.skimmer.date, model.skimmer.isEnabled, window.contains(date) {
+            let span = window.upperBound.timeIntervalSince(window.lowerBound)
+            Rectangle().fill(.red).frame(width: 1)
+                .offset(x: width * date.timeIntervalSince(window.lowerBound) / span)
+                .allowsHitTesting(false)
         }
     }
 }

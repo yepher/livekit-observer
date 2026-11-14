@@ -18,6 +18,8 @@ struct LiveKitObserverApp: App {
                     .disabled(!model.player.isLoaded)
                 Button("Back 10 Seconds") { model.player.skip(-10) }.keyboardShortcut(.leftArrow, modifiers: .command)
                 Button("Forward 10 Seconds") { model.player.skip(10) }.keyboardShortcut(.rightArrow, modifiers: .command)
+                Divider()
+                Toggle("Skimming", isOn: Bindable(model.skimmer).isEnabled).keyboardShortcut("s", modifiers: .option)
             }
             CommandGroup(after: .toolbar) {
                 Button("Refresh Sessions") { Task { await model.refresh() } }.keyboardShortcut("r")

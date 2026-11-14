@@ -17,6 +17,8 @@ A macOS app for reviewing LiveKit Cloud sessions: the transcript, agent logs, tr
 open "build/LiveKit Observer.app"
 ```
 
+`build.sh` signs with your Apple Development certificate when you have one (set `SIGN_IDENTITY` to choose another), so the app keeps the same identity across rebuilds and the Keychain's **Always Allow** for the storage secret sticks. Without a certificate it signs ad hoc, and macOS asks for the secret again after every rebuild.
+
 ## Setup
 
 ### LiveKit
@@ -60,7 +62,7 @@ Otherwise its channels are labeled left and right.
 - **Session list.** The list is grouped by day and shows each session's room, start time, duration, and the agent that ran it (its dispatch name, read from the session's first log record and cached; names containing "dev" are orange). Tags show which sessions have an egress recording or observability data. LiveKit keeps observability data for 30 days, so older egress recordings show as "Recording only".
 - **Session detail.** It shows the transcript, logs, traces, and metrics, plus a summary with latency (end-to-end, LLM first token, TTS first byte, end-of-turn and transcription delays), low-confidence user speech, and warnings. **Copy for Claude** puts a Markdown digest on the clipboard for a coding agent. It contains what people said, so paste it only into your own tools.
 - **Playback.** When a session has both an egress recording and LiveKit's recording, the player switches between them at the same moment.
-- **Spectrogram.** It shows a log-mel spectrogram (80 bands, 50 Hz–12 kHz, 10 ms columns, a fixed −100 to −5 dBFS scale so lanes compare) for every channel of each recording on one timeline, stacked or side by side. Pick a zoom preset or pinch to zoom from 2 seconds to the whole session; click a lane to play from there. Ticks mark where agent (blue) and user (green) turns begin. LiveKit's recording puts the user on the left channel and the agent on the right. Egress reports its start a fraction of a second early, so the app lines the two recordings up by matching their loudness.
+- **Spectrogram.** It shows a log-mel spectrogram (80 bands, 50 Hz–12 kHz, 10 ms columns, a fixed −100 to −5 dBFS scale so lanes compare) for every channel of each recording on one timeline, stacked or side by side. Pick a zoom preset or pinch to zoom from 2 seconds to the whole session. Click a lane to move the playhead there; the view stays put and turns the page when playback reaches its right edge. Drag to scroll a zoomed view, or to scrub when the whole session is showing. Moving the pointer over a lane skims: a red line follows it and you hear the audio under it, as in Final Cut Pro (Playback › Skimming, ⌥S, turns it off). Ticks mark where agent (blue) and user (green) turns begin. LiveKit's recording puts the user on the left channel and the agent on the right. Egress and LiveKit's recording start at different moments on different clocks, so the app lines them up by matching their loudness and shows the difference beside each recording. If it picks the wrong spot, the ↔ menu beside Egress matches again, goes back to the reported start times, or nudges egress by 0.1 or 1 second; nudges are remembered for the session.
 
 ## Privacy
 

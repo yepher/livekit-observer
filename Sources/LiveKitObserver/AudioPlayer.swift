@@ -78,3 +78,64 @@ final class AudioPlayer {
         play()
     }
 }
+
+/// Final Cut–style skimming: as the pointer moves over a spectrogram, play short bursts of the audio under it,
+/// without moving the playhead. Uses its own engine so the main player is left alone.
+@MainActor @Observable
+final class Skimmer {
+    static let enabledKey = "skimming"
+    var isEnabled: Bool = UserDefaults.standard.object(forKey: Skimmer.enabledKey) as? Bool ?? true {
+        didSet { UserDefaults.standard.set(isEnabled, forKey: Self.enabledKey); if !isEnabled { end() } }
+    }
+    /// Where the pointer is on the session's wall clock, drawn as the skimmer line in every lane.
+    private(set) var date: Date?
+
+    @ObservationIgnored private let engine = AVAudioEngine()
+    @ObservationIgnored private let node = AVAudioPlayerNode()
+    @ObservationIgnored private var file: AVAudioFile?
+    @ObservationIgnored private var lastSecond: TimeInterval?
+    @ObservationIgnored private var lastBurst = Date.distantPast
+
+    init() { engine.attach(node) }
+
+    /// The pointer is at `date` over the recording in `url`, whose first sample is at `origin`.
+    /// Plays audio only when `audible` (the main player is paused, say).
+    func move(to date: Date, url: URL, origin: Date, audible: Bool) {
+        self.date = date
+        guard isEnabled, audible, prepare(url) , let file else { return }
+        let second = date.timeIntervalSince(origin)
+        let now = Date()
+        // A burst about as long as the pointer moved, so slow skims sound slow and fast ones stay short.
+        let moved = abs(second - (lastSecond ?? second))
+        guard now.timeIntervalSince(lastBurst) >= 0.04 || lastSecond == nil else { return }
+        lastSecond = second
+        lastBurst = now
+        let rate = file.processingFormat.sampleRate
+        let first = AVAudioFramePosition(second * rate)
+        guard first >= 0, first < file.length else { node.stop(); return }
+        let length = min(max(moved, 0.08), 0.25)
+        let frames = AVAudioFrameCount(min(Double(file.length - first), length * rate))
+        node.stop()
+        node.scheduleSegment(file, startingFrame: first, frameCount: frames, at: nil)
+        node.play()
+    }
+
+    /// The pointer left the spectrogram, or a drag took over.
+    func end() {
+        date = nil
+        lastSecond = nil
+        node.stop()
+    }
+
+    private func prepare(_ url: URL) -> Bool {
+        if file?.url == url { return true }
+        node.stop()
+        engine.stop()
+        guard let opened = try? AVAudioFile(forReading: url) else { file = nil; return false }
+        file = opened
+        engine.disconnectNodeOutput(node)
+        engine.connect(node, to: engine.mainMixerNode, format: opened.processingFormat)
+        do { try engine.start() } catch { file = nil; return false }
+        return true
+    }
+}

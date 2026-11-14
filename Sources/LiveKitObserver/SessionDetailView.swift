@@ -64,9 +64,9 @@ struct SessionDetailView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(detail.row.roomName.isEmpty ? detail.row.id : detail.row.roomName).font(.title3.weight(.semibold)).textSelection(.enabled)
+                Text(detail.row.roomName.isEmpty ? detail.row.id : detail.row.roomName).font(.title3.weight(.semibold)).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                 HStack(spacing: 8) {
-                    Text(detail.row.id).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text(detail.row.id).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
                     if detail.row.session != nil, let url = model.dashboardURL(for: detail.row.id) {
                         Link(destination: url) { Label("LiveKit dashboard", systemImage: "arrow.up.right.square") }.font(.caption)
                     }
@@ -76,7 +76,7 @@ struct SessionDetailView: View {
             if let state = detail.dataState, state != "settled" {
                 Label(state == "settling" ? "Data still arriving" : "Session in progress", systemImage: "hourglass").font(.caption).foregroundStyle(.orange)
             }
-            LabeledContent("Duration", value: Format.duration(detail.row.duration)).font(.caption)
+            LabeledContent("Duration", value: Format.duration(detail.row.duration)).font(.caption).fixedSize()
         }
         .padding()
     }
@@ -98,9 +98,10 @@ struct PlayerBar: View {
                 Button { player.toggle() } label: { Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill").font(.title) }
                     .buttonStyle(.borderless)
                 Button { player.skip(10) } label: { Image(systemName: "goforward.10") }.buttonStyle(.borderless)
-                Text(Format.duration(player.currentTime)).font(.caption.monospacedDigit())
+                Text(Format.duration(player.currentTime)).font(.caption.monospacedDigit()).fixedSize()
                 Slider(value: Binding(get: { player.currentTime }, set: { player.seek(to: $0) }), in: 0...max(player.duration, 1))
-                Text(Format.duration(player.duration)).font(.caption.monospacedDigit())
+                    .frame(minWidth: 60)
+                Text(Format.duration(player.duration)).font(.caption.monospacedDigit()).fixedSize()
                 Picker("Speed", selection: Binding(get: { player.rate }, set: { player.rate = $0 })) {
                     ForEach([0.75, 1, 1.25, 1.5, 2] as [Float], id: \.self) { Text("\($0.formatted())×").tag($0) }
                 }
@@ -357,8 +358,10 @@ struct LogsView: View {
                     Button("Copy Message Only") { AppModel.copy(records.filter { ids.contains($0.id) }.map(\.message).joined(separator: "\n")) }
                 }
                 .onCopyCommand { copy(selected, from: records); return [] }
+                .frame(minWidth: 340, idealWidth: 560, maxWidth: .infinity)
+                .layoutPriority(1)
                 if selected.count == 1, let record = detail.logs.first(where: { selected.contains($0.id) }) {
-                    AttributesView(title: record.message, attributes: record.attributes).frame(minWidth: 240, idealWidth: 300)
+                    AttributesView(title: record.message, attributes: record.attributes).frame(minWidth: 220, idealWidth: 300, maxWidth: 480)
                 }
             }
         }
@@ -430,18 +433,20 @@ struct TracesView: View {
                     Image(systemName: node.span.failed ? "xmark.octagon.fill" : "circle.fill").font(.system(size: 6)).foregroundStyle(node.span.failed ? .red : .secondary)
                     Text(node.span.name).lineLimit(1)
                     Spacer()
-                    TimelineBar(start: node.span.start, duration: node.span.duration, origin: start, total: total).frame(width: 180, height: 8)
+                    TimelineBar(start: node.span.start, duration: node.span.duration, origin: start, total: total).frame(minWidth: 60, maxWidth: 180).frame(height: 8)
                     Text(node.span.duration.map { $0 < 1 ? "\(Int($0 * 1000)) ms" : String(format: "%.2f s", $0) } ?? "–")
                         .font(.caption.monospacedDigit()).foregroundStyle((node.span.duration ?? 0) >= 2 ? .orange : .secondary).frame(width: 64, alignment: .trailing)
                 }
                 .tag(node.id)
             }
+            .frame(minWidth: 340, idealWidth: 560, maxWidth: .infinity)
+            .layoutPriority(1)
             if let span = detail.spans.first(where: { $0.id == selected }) {
                 VStack(alignment: .leading) {
                     HStack { Text("Starts"); TimeButton(date: span.start, origin: origin) }.font(.caption).padding([.top, .horizontal])
                     AttributesView(title: span.statusMessage.isEmpty ? span.name : "\(span.name): \(span.statusMessage)", attributes: span.attributes)
                 }
-                .frame(minWidth: 240, idealWidth: 320)
+                .frame(minWidth: 220, idealWidth: 320, maxWidth: 480)
             }
         }
         .overlay { if detail.spans.isEmpty { ContentUnavailableView("No trace spans", systemImage: "point.3.connected.trianglepath.dotted") } }

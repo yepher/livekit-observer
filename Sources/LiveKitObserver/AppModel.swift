@@ -86,6 +86,10 @@ final class SessionDetail {
     var analyzing: Set<RecordingSource.Kind> = []
     /// Corrections to each recording's reported start time, found by matching the recordings' audio.
     var originCorrection: [RecordingSource.Kind: TimeInterval] = [:]
+    /// How the egress recording was lined up with LiveKit's, shown beside it.
+    var alignment: Alignment = .reported
+
+    enum Alignment { case reported, byAudio, byHand, noMatch }
 
     /// When a recording's first sample was heard, corrected so the recordings line up with LiveKit's clock.
     func origin(of source: RecordingSource) -> Date? { source.origin?.addingTimeInterval(originCorrection[source.kind] ?? 0) }
@@ -113,6 +117,7 @@ final class AppModel {
     var filter = ""
     var onlyWithRecording = false
     let player = AudioPlayer()
+    let skimmer = Skimmer()
 
     private var settings = AppSettings()
     private var manifests: [String: EgressRecording] = [:]
@@ -440,20 +445,59 @@ final class AppModel {
         await align(detail)
     }
 
-    /// Egress reports when it started, a fraction of a second before its first audio, so line its
+    /// Egress and LiveKit's recording start on different clocks, at different moments, so line the egress
     /// recording up with LiveKit's (whose clock the transcript and logs use) by matching their audio.
+    /// A hand adjustment saved for the session wins.
     private func align(_ detail: SessionDetail) async {
-        guard detail.originCorrection[.egress] == nil,
-              let egress = detail.sources.first(where: { $0.kind == .egress }), let egressStart = egress.origin,
+        guard detail.alignment == .reported, detail.sources.contains(where: { $0.kind == .egress }) else { return }
+        if let saved = UserDefaults.standard.object(forKey: Self.alignmentKey(detail)) as? Double {
+            setCorrection(saved, how: .byHand, in: detail)
+            return
+        }
+        await alignByAudio(detail)
+    }
+
+    /// Finds the egress recording's offset from LiveKit's by matching their loudness over time.
+    func alignByAudio(_ detail: SessionDetail) async {
+        guard let egress = detail.sources.first(where: { $0.kind == .egress }), let egressStart = egress.origin,
               let livekit = detail.sources.first(where: { $0.kind == .observability }), let livekitStart = livekit.origin,
               let a = detail.spectrograms[.egress], let b = detail.spectrograms[.observability]
         else { return }
         let reported = egressStart.timeIntervalSince(livekitStart)
-        let measured = await Task.detached(priority: .userInitiated) { a.startOffset(from: b, expected: reported) }.value
-        guard let measured else { return }
-        detail.originCorrection[.egress] = measured - reported
-        if detail.activeSource == .egress, detail === self.detail { player.setOrigin(detail.origin(of: egress)) }
+        // Search the whole plausible range around the reported offset, since the two clocks can disagree by a lot.
+        let range = max(30, min(300, max(a.duration, b.duration)))
+        let measured = await Task.detached(priority: .userInitiated) { a.startOffset(from: b, expected: reported, range: range) }.value
+        UserDefaults.standard.removeObject(forKey: Self.alignmentKey(detail))
+        if let measured {
+            setCorrection(measured - reported, how: .byAudio, in: detail)
+        } else {
+            setCorrection(nil, how: .noMatch, in: detail)
+        }
     }
+
+    /// Moves the egress recording later (positive) or earlier on the session timeline, and remembers it for the session.
+    func nudgeEgress(_ detail: SessionDetail, by seconds: TimeInterval) {
+        let value = (((detail.originCorrection[.egress] ?? 0) + seconds) * 1000).rounded() / 1000
+        UserDefaults.standard.set(value, forKey: Self.alignmentKey(detail))
+        setCorrection(value, how: .byHand, in: detail)
+    }
+
+    /// Goes back to the start times the recordings report, for now.
+    func resetAlignment(_ detail: SessionDetail) {
+        UserDefaults.standard.removeObject(forKey: Self.alignmentKey(detail))
+        setCorrection(nil, how: .reported, in: detail)
+    }
+
+    private func setCorrection(_ value: TimeInterval?, how: SessionDetail.Alignment, in detail: SessionDetail) {
+        detail.originCorrection[.egress] = value
+        detail.alignment = how
+        if detail.activeSource == .egress, detail === self.detail,
+           let egress = detail.sources.first(where: { $0.kind == .egress }) {
+            player.setOrigin(detail.origin(of: egress))
+        }
+    }
+
+    private static func alignmentKey(_ detail: SessionDetail) -> String { "egressAlignment." + detail.row.id }
 
     func dashboardURL(for id: String) -> URL? { projectId.flatMap { LiveKitCLI.dashboardURL(project: $0, session: id) } }
 
