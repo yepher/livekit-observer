@@ -413,7 +413,9 @@ final class AppModel {
     private func play(_ source: RecordingSource, in detail: SessionDetail) async {
         detail.activeSource = source.kind
         detail.audioSource = source.detail
-        await player.load(source.file, origin: detail.origin(of: source), title: detail.row.roomName)
+        let file = await Task.detached(priority: .userInitiated) { await PlaybackFile.timed(source.file) }.value
+        guard detail.activeSource == source.kind else { return }
+        await player.load(file, origin: detail.origin(of: source), title: detail.row.roomName)
     }
 
     /// Switches recordings at the same moment of the session, keeping playback going.

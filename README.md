@@ -67,4 +67,4 @@ Otherwise its channels are labeled left and right.
 
 ## Privacy
 
-Recordings and transcripts contain people's voices and words. Downloads are cached only on this Mac, in `~/Library/Caches/LiveKitObserver`; Settings › Downloads deletes them.
+Recordings and transcripts contain people's voices and words. Downloads are cached only on this Mac, in `~/Library/Caches/LiveKitObserver`, along with lossless copies of recordings that macOS's player mistimes (LiveKit's own recordings skip silent stretches, so the player would play each moment early); Settings › Downloads deletes them.

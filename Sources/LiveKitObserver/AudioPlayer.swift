@@ -139,3 +139,54 @@ final class Skimmer {
         return true
     }
 }
+
+/// AVPlayer mistimes some Ogg Opus files. LiveKit's session recordings skip silent stretches in the
+/// stream, and AVPlayer then reports a shorter length and plays each moment early, while decoding the
+/// file (as the spectrogram does) gives every sample its true place. Such files are played from a
+/// lossless copy decoded the same way, so what you hear matches the timeline.
+enum PlaybackFile {
+    /// The file to play for `url`: the file itself when AVPlayer times it correctly, otherwise a cached
+    /// lossless copy beside it.
+    static func timed(_ url: URL) async -> URL {
+        let copy = url.appendingPathExtension("playback.caf")
+        if FileManager.default.fileExists(atPath: copy.path) { return copy }
+        guard url.pathExtension.lowercased() != "caf", await needsCopy(url) else { return url }
+        do {
+            try decode(url, to: copy)
+            return copy
+        } catch {
+            try? FileManager.default.removeItem(at: copy)
+            return url
+        }
+    }
+
+    /// Whether AVPlayer's idea of the length differs from the decoded length by more than a quarter second.
+    static func needsCopy(_ url: URL) async -> Bool {
+        guard let file = try? AVAudioFile(forReading: url) else { return false }
+        let decoded = Double(file.length) / file.processingFormat.sampleRate
+        guard let reported = try? await AVURLAsset(url: url).load(.duration).seconds, reported.isFinite else { return true }
+        return abs(reported - decoded) > 0.25
+    }
+
+    /// Decodes `url` and writes every sample, in order, to an Apple Lossless file.
+    static func decode(_ url: URL, to destination: URL) throws {
+        let input = try AVAudioFile(forReading: url)
+        let format = input.processingFormat
+        let partial = destination.appendingPathExtension("partial")
+        try? FileManager.default.removeItem(at: partial)
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatAppleLossless, AVSampleRateKey: format.sampleRate,
+            AVNumberOfChannelsKey: format.channelCount, AVEncoderBitDepthHintKey: 16,
+        ]
+        do {
+            let output = try AVAudioFile(forWriting: partial, settings: settings, commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1 << 16) else { throw CocoaError(.fileWriteUnknown) }
+            while input.framePosition < input.length {
+                try input.read(into: buffer)
+                if buffer.frameLength == 0 { break }
+                try output.write(from: buffer)
+            }
+        }
+        try FileManager.default.moveItem(at: partial, to: destination)
+    }
+}

@@ -288,3 +288,21 @@ private func json(_ text: String) throws -> JSONValue { try JSONValue.parse(Data
         #expect(!flag.marks(try span("next_turn", from: 20, to: 22)))
     }
 }
+
+@Suite struct PlaybackFileTests {
+    /// LiveKit's recording of RM_YKzvGTR8nqoi, if it is cached on this Mac: AVPlayer called it 381.8 s, decoding gives 494.2 s.
+    @Test func copiesARecordingAVPlayerMistimes() async throws {
+        let original = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/LiveKitObserver/livekit/RM_YKzvGTR8nqoi.ogg")
+        guard FileManager.default.fileExists(atPath: original.path) else { return }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".ogg")
+        try FileManager.default.copyItem(at: original, to: url)
+        defer { try? FileManager.default.removeItem(at: url); try? FileManager.default.removeItem(at: url.appendingPathExtension("playback.caf")) }
+        #expect(await PlaybackFile.needsCopy(url))
+        let played = await PlaybackFile.timed(url)
+        #expect(played.pathExtension == "caf")
+        let decoded = try AVAudioFile(forReading: url), copy = try AVAudioFile(forReading: played)
+        #expect(abs(Int64(decoded.length) - Int64(copy.length)) < 4800)
+        let seconds = try await AVURLAsset(url: played).load(.duration).seconds
+        #expect(abs(seconds - Double(decoded.length) / decoded.processingFormat.sampleRate) < 0.1)
+    }
+}
