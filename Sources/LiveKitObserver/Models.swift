@@ -9,6 +9,11 @@ struct LiveKitSession: Identifiable, Hashable, Sendable {
     let endedAt: Date?
     let participants: Int?
     let hasDetailData: Bool
+    /// Tags the agent added to the session, such as `flagged:learner`.
+    let tags: [String]
+
+    /// Whether someone flagged a moment from the lesson page; the agent tags such sessions when they end.
+    var flaggedInLesson: Bool { tags.contains(Flag.lessonTag) }
 
     init?(json: JSONValue) {
         guard let id = json["sessionId"]?.string ?? json["session_id"]?.string ?? json["id"]?.string else { return nil }
@@ -19,6 +24,7 @@ struct LiveKitSession: Identifiable, Hashable, Sendable {
         endedAt = json["endedAt"]?.date ?? json["ended_at"]?.date ?? json["lastActive"]?.date
         participants = (json["numParticipants"]?.double ?? json["num_participants"]?.double).map { Int($0) }
         hasDetailData = json["hasDetailData"]?.bool ?? json["has_detail_data"]?.bool ?? false
+        tags = (json["tags"]?.array ?? []).compactMap { $0.string ?? $0["name"]?.string }
     }
 }
 
@@ -196,6 +202,7 @@ struct MetricPoint: Identifiable, Hashable, Sendable {
     let min: Double?
     let max: Double?
     let value: Double?
+    let attributes: [String: JSONValue]
 
     var mean: Double? { guard let c = count, c > 0, let s = sum else { return value }; return s / c }
 
@@ -212,5 +219,6 @@ struct MetricPoint: Identifiable, Hashable, Sendable {
         max = h?["max"]?.double
         value = json["value"]?.double ?? json["gauge"]?["value"]?.double ?? json["sum"]?["value"]?.double
             ?? json["asDouble"]?.double ?? json["asInt"]?.double
+        attributes = json["attributes"]?.object ?? [:]
     }
 }

@@ -60,6 +60,13 @@ struct SessionDetailView: View {
         }
         .onChange(of: model.renamingFlag) { _, id in flagNote = detail.flags.first { $0.id == id }?.note ?? "" }
         .toolbar {
+            ToolbarItem {
+                Button { model.toggleSessionFlag(detail.row.id) } label: {
+                    Label(model.isFlagged(detail.row.id) ? "Unflag Session" : "Flag Session", systemImage: model.isFlagged(detail.row.id) ? "flag.fill" : "flag")
+                }
+                .foregroundStyle(model.isFlagged(detail.row.id) ? .orange : .primary)
+                .help("Flag this session so it is easy to find in the list")
+            }
             ToolbarItem { FlagsMenu(detail: detail, origin: origin) }
             ToolbarItem {
                 Button { model.openDashboard(detail.row.id) } label: { Label("Open in LiveKit", systemImage: "safari") }
@@ -182,6 +189,7 @@ struct OverviewView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading).padding(4)
                     }
+                    CostBox(detail: detail)
                     if !e2ePoints.isEmpty {
                         GroupBox("Response time per agent turn") {
                             Chart(e2ePoints, id: \.0) { point in
@@ -590,6 +598,68 @@ struct MetricsView: View {
     private func value(_ v: Double?, _ unit: String) -> String {
         guard let v else { return "–" }
         return unit == "s" ? "\(Int((v * 1000).rounded())) ms" : v.formatted(.number.precision(.significantDigits(4)))
+    }
+}
+
+/// What the session cost at the chosen plan's overage rates.
+struct CostBox: View {
+    let detail: SessionDetail
+    @AppStorage("pricePlan") private var planId = PricePlan.scale.id
+    @AppStorage("noiseCancellation") private var noiseCancellation = false
+
+    var body: some View {
+        let plan = PricePlan.named(planId)
+        let lines = SessionCost.lines(plan: plan, room: detail.room, spans: detail.spans, metrics: detail.metrics, logs: detail.logs,
+                                      transcriptItems: detail.transcript.count, noiseCancellation: noiseCancellation)
+        let total = lines.compactMap(\.cost).reduce(0, +)
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
+                    ForEach(CostLine.Group.allCases, id: \.self) { group in
+                        let rows = lines.filter { $0.group == group }
+                        if !rows.isEmpty {
+                            GridRow {
+                                Text(group.rawValue).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                Text("Used").font(.caption).foregroundStyle(.secondary)
+                                Text("Rate").font(.caption).foregroundStyle(.secondary)
+                                Text("Cost").font(.caption).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                            }
+                            ForEach(rows) { line in
+                                GridRow {
+                                    Text(line.item).textSelection(.enabled)
+                                    Text(line.quantity).monospacedDigit().foregroundStyle(.secondary)
+                                    Text(line.rate).foregroundStyle(.secondary)
+                                    Text(line.cost.map(Format.dollars) ?? "–").monospacedDigit()
+                                }
+                            }
+                        }
+                    }
+                    Divider()
+                    GridRow {
+                        Text("Total").font(.headline)
+                        Text(Format.duration(detail.row.duration)).foregroundStyle(.secondary)
+                        Text(detail.row.duration.map { $0 > 0 ? "\(Format.dollars(total / ($0 / 60)))/min" : "" } ?? "").foregroundStyle(.secondary)
+                        Text(Format.dollars(total)).font(.headline.monospacedDigit())
+                    }
+                }
+                Text("At \(plan.name) overage rates, so this is what the session costs once the month's included usage runs out; before that it is covered by the plan. \(plan.note) Lines marked “billed by” use your own provider keys and are not LiveKit charges.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if detail.room == nil && !detail.loadingObservability {
+                    Text("LiveKit didn't return participant times for this session, so connection costs are missing.").font(.caption).foregroundStyle(.orange)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(4)
+        } label: {
+            HStack {
+                Text("Cost").font(.headline)
+                Text(Format.dollars(total)).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Toggle("Krisp noise cancellation", isOn: $noiseCancellation).toggleStyle(.checkbox).font(.caption)
+                    .help("Turn on if your agent uses LiveKit's noise cancellation (BVC/NC). LiveKit doesn't report it per session.")
+                Picker("Plan", selection: $planId) { ForEach(PricePlan.all) { Text($0.name).tag($0.id) } }
+                    .labelsHidden().fixedSize().controlSize(.small)
+            }
+        }
     }
 }
 

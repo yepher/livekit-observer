@@ -107,6 +107,14 @@ struct LiveKitCLI: Sendable {
         return (name, Self.dataState(json) == "settled")
     }
 
+    /// How many moments were flagged from the lesson page, counted from the session's warning log lines.
+    /// `settled` is false while LiveKit may still be ingesting the session's logs.
+    func lessonFlagCount(_ id: String) async throws -> (count: Int, settled: Bool) {
+        let json = try await analytics(["session", "logs", id, "--log-level", "warn", "--limit", "2000"])
+        let count = json.items.filter { ($0["message"]?.string ?? "").hasPrefix(Flag.lessonLogPrefix) }.count
+        return (count, Self.dataState(json) == "settled")
+    }
+
     func transcript(_ id: String) async throws -> (items: [TranscriptItem], status: String?) {
         let json = try await analytics(["session", "transcript", id, "--limit", "5000"])
         return (json.items.enumerated().map { TranscriptItem(json: $1, index: $0) }, Self.dataState(json))
@@ -118,6 +126,11 @@ struct LiveKitCLI: Sendable {
 
     func traces(_ id: String) async throws -> [Span] {
         try await analytics(["session", "traces", id, "--limit", "20000"]).items.enumerated().map { Span(json: $1, index: $0) }
+    }
+
+    /// Participants' connected time and the room's bandwidth, for the cost breakdown.
+    func roomUsage(_ id: String) async throws -> RoomUsage? {
+        RoomUsage(json: try await analytics(["session", "get", id]))
     }
 
     func metrics(_ id: String) async throws -> [MetricPoint] {

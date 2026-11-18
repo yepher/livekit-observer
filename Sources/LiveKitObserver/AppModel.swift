@@ -72,6 +72,8 @@ final class SessionDetail {
     var logs: [LogRecord] = []
     var spans: [Span] = []
     var metrics: [MetricPoint] = []
+    /// Participants' connected time and bandwidth, for the cost breakdown.
+    var room: RoomUsage?
     var dataState: String?
     var insights: SessionInsights?
     var observabilityError: LiveKitCLIError?
@@ -121,6 +123,11 @@ final class AppModel {
     var storageConfigured = false
     var filter = ""
     var onlyWithRecording = false
+    var onlyFlagged = false
+    /// Sessions flagged in the list so they are easy to find again; saved on this Mac. Session IDs are unique across projects.
+    private(set) var flaggedSessions = Set(UserDefaults.standard.stringArray(forKey: AppModel.flaggedSessionsKey) ?? [])
+    /// Sessions with flags in them (each flag carries a note), shown with a paperclip.
+    private(set) var sessionsWithNotes: Set<String> = AppModel.loadSessionsWithNotes()
     let player = AudioPlayer()
     let skimmer = Skimmer()
     /// The flag whose note is being edited, shown as a sheet over the session.
@@ -138,11 +145,18 @@ final class AppModel {
     private var agentNameRequested: Set<String> = []
     private var agentNameQueue: [String] = []
     private var agentNameFetches = 0
+    /// Moments flagged from the lesson page per session, read from warning logs as rows appear; cached once settled.
+    private(set) var lessonFlagCounts: [String: Int] = AppModel.loadLessonFlagCounts()
+    private var lessonFlagsRequested: Set<String> = []
+    private var lessonFlagQueue: [String] = []
+    private var lessonFlagFetches = 0
+    private static var lessonFlagsFile: URL { AppSettings.cacheDirectory.appendingPathComponent("lesson-flags.json") }
     private static var agentNamesFile: URL { AppSettings.cacheDirectory.appendingPathComponent("agent-names.json") }
 
     var visibleRows: [SessionRow] {
         rows.filter { row in
             (!onlyWithRecording || row.recording != nil)
+                && (!onlyFlagged || flaggedSessions.contains(row.id) || flaggedInLesson(row))
                 && (filter.isEmpty || row.roomName.localizedCaseInsensitiveContains(filter) || row.id.localizedCaseInsensitiveContains(filter))
         }
     }
@@ -220,9 +234,51 @@ final class AppModel {
 
     /// Looks up the agent name for a row the list is showing. Only sessions with observability data have logs to read.
     func requestAgentName(for row: SessionRow) {
+        requestLessonFlags(for: row)
         guard row.session?.hasDetailData == true, agentNames[row.id] == nil, agentNameRequested.insert(row.id).inserted else { return }
         agentNameQueue.append(row.id)
         pumpAgentNames()
+    }
+
+    /// Whether moments in a session were flagged from the lesson page: by its tag, its logs, or the open session's flags.
+    func flaggedInLesson(_ row: SessionRow) -> Bool {
+        if let detail, detail.row.id == row.id, detail.flags.contains(where: \.isFromLesson) { return true }
+        return row.session?.flaggedInLesson == true || (lessonFlagCounts[row.id] ?? 0) > 0
+    }
+
+    private func requestLessonFlags(for row: SessionRow) {
+        guard row.session?.hasDetailData == true, lessonFlagCounts[row.id] == nil || row.session?.status == "active",
+              lessonFlagsRequested.insert(row.id).inserted else { return }
+        lessonFlagQueue.append(row.id)
+        pumpLessonFlags()
+    }
+
+    private func pumpLessonFlags() {
+        guard let cli else { return }
+        while lessonFlagFetches < 3, let id = lessonFlagQueue.popLast() {
+            lessonFlagFetches += 1
+            Task {
+                let result = try? await cli.lessonFlagCount(id)
+                lessonFlagFetches -= 1
+                if let result { lessonFlagCounts[id] = result.count }
+                if let result, result.settled {
+                    saveLessonFlagCounts()
+                } else {
+                    lessonFlagsRequested.remove(id)  // logs may still arrive; check again the next time the row appears
+                }
+                pumpLessonFlags()
+            }
+        }
+    }
+
+    private static func loadLessonFlagCounts() -> [String: Int] {
+        guard let data = try? Data(contentsOf: lessonFlagsFile) else { return [:] }
+        return (try? JSONDecoder().decode([String: Int].self, from: data)) ?? [:]
+    }
+
+    private func saveLessonFlagCounts() {
+        try? FileManager.default.createDirectory(at: AppSettings.cacheDirectory, withIntermediateDirectories: true)
+        try? JSONEncoder().encode(lessonFlagCounts).write(to: Self.lessonFlagsFile, options: .atomic)
     }
 
     private func pumpAgentNames() {
@@ -304,6 +360,7 @@ final class AppModel {
     private func openSelection() {
         detailTask?.cancel()
         player.unload()
+        if let previous = detail { noteFlags(of: previous) }
         guard let selection, let row = rows.first(where: { $0.id == selection }) else { detail = nil; return }
         let detail = SessionDetail(row: row)
         self.detail = detail
@@ -334,13 +391,18 @@ final class AppModel {
             async let logs = cli.logs(id)
             async let spans = cli.traces(id)
             async let metrics = cli.metrics(id)
+            async let room = cli.roomUsage(id)
             let t = try await transcript
             detail.transcript = t.items
             detail.dataState = t.status
             detail.logs = (try? await logs) ?? []
             detail.spans = (try? await spans) ?? []
             detail.metrics = (try? await metrics) ?? []
+            detail.room = (try? await room) ?? nil
             detail.insights = SessionInsights(transcript: detail.transcript, logs: detail.logs, spans: detail.spans)
+            detail.applyLessonFlags()
+            lessonFlagCounts[id] = detail.flags.filter(\.isFromLesson).count
+            if detail.dataState == "settled" { saveLessonFlagCounts() }
             detail.observabilityError = nil
         } catch let error as LiveKitCLIError {
             detail.observabilityError = error
@@ -537,6 +599,32 @@ final class AppModel {
             if !event.isARepeat { self.player.toggle() }
             return nil
         }
+    }
+
+    // MARK: Session flags and notes
+
+    private static let flaggedSessionsKey = "flaggedSessions"
+
+    func isFlagged(_ id: String) -> Bool { flaggedSessions.contains(id) }
+
+    func toggleSessionFlag(_ id: String) {
+        if flaggedSessions.remove(id) == nil { flaggedSessions.insert(id) }
+        UserDefaults.standard.set(flaggedSessions.sorted(), forKey: Self.flaggedSessionsKey)
+    }
+
+    /// Whether a session has flags with notes; the open session is read live so the list updates as you flag.
+    func hasNotes(_ id: String) -> Bool {
+        if let detail, detail.row.id == id { return detail.flags.contains { !$0.isFromLesson } }
+        return sessionsWithNotes.contains(id)
+    }
+
+    private func noteFlags(of detail: SessionDetail) {
+        if detail.flags.allSatisfy(\.isFromLesson) { sessionsWithNotes.remove(detail.row.id) } else { sessionsWithNotes.insert(detail.row.id) }
+    }
+
+    private static func loadSessionsWithNotes() -> Set<String> {
+        let prefix = SessionDetail.flagsKey("")
+        return Set(UserDefaults.standard.dictionaryRepresentation().keys.filter { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) })
     }
 
     /// Flags the turn at the playhead and asks for a note.

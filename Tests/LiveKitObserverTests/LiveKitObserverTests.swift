@@ -306,3 +306,85 @@ private func json(_ text: String) throws -> JSONValue { try JSONValue.parse(Data
         #expect(abs(seconds - Double(decoded.length) / decoded.processingFormat.sampleRate) < 0.1)
     }
 }
+
+@Suite struct CostTests {
+    private func parse(_ text: String) throws -> JSONValue { JSONValue(any: try JSONSerialization.jsonObject(with: Data(text.utf8))) }
+
+    private let room = """
+    {"detail":{"bandwidthOut":"32435293","participants":[
+      {"participantIdentity":"EG_6PvS7vfBLDZP","sessions":[{"durationSeconds":"1519"}]},
+      {"participantIdentity":"8784e62a","participantName":"Gabby","sessions":[{"durationSeconds":"1522"}]},
+      {"participantIdentity":"agent-AJ_9JRgUR9Yj2A","sessions":[{"durationSeconds":"1522"}]}]}}
+    """
+
+    @Test func readsParticipantsFromSessionGet() throws {
+        let usage = try #require(RoomUsage(json: try parse(room)))
+        #expect(usage.seconds(\.isAgent) == 1522)
+        #expect(usage.seconds(\.isEgress) == 1519)
+        #expect(usage.bytesOut == 32435293)
+    }
+
+    @Test func pricesAScaleSessionFromItsTelemetry() throws {
+        let spans = try [
+            #"{"spanId":"a","name":"tts_request","attributes":{"lk.cloud_agent_id":"CA_1","lk.pii.input_text":"Hello, Gabby!","lk.tts_metrics":{"metadata":{"model_name":"cartesia/sonic-3","model_provider":"livekit"}}}}"#,
+            #"{"spanId":"b","name":"llm_request","attributes":{"gen_ai.request.model":"openai/gpt-4.1-mini","gen_ai.provider.name":"livekit","gen_ai.usage.input_tokens":1000000,"gen_ai.usage.output_tokens":1000}}"#,
+        ].enumerated().map { Span(json: try parse($1), index: $0) }
+        let metrics = [MetricPoint(json: try parse(#"{"name":"lk.agents.usage.stt_audio_duration","value":3600,"attributes":{"model_name":"deepgram/nova-3","model_provider":"livekit"}}"#), index: 0)]
+        let lines = SessionCost.lines(plan: .scale, room: RoomUsage(json: try parse(room)), spans: spans, metrics: metrics, logs: [],
+                                      transcriptItems: 10, noiseCancellation: false)
+        func cost(_ prefix: String) -> Double? { lines.first { $0.item.hasPrefix(prefix) }?.cost ?? nil }
+        #expect(abs(cost("Agent session")! - 1522.0 / 60 * 0.01) < 1e-9)
+        #expect(abs(cost("WebRTC participants")! - 3044.0 / 60 * 0.0004) < 1e-9)  // egress is billed as transcode
+        #expect(abs(cost("Egress transcode")! - 1519.0 / 60 * 0.004) < 1e-9)
+        #expect(abs(cost("LLM openai/gpt-4.1-mini input")! - 0.4) < 1e-9)  // not gpt-4.1's rate
+        #expect(abs(cost("STT deepgram/nova-3")! - 0.252) < 1e-9)
+        #expect(abs(cost("TTS cartesia/sonic-3")! - 13 / 1e6 * 37.5) < 1e-12)
+        #expect(lines.first { $0.item.hasPrefix("Logs, spans") }?.quantity == "12")
+        #expect(!lines.contains { $0.item == "Noise cancellation" })
+    }
+
+    @Test func selfHostedAgentsAndOwnProviderKeysAreNotLiveKitCharges() throws {
+        let spans = [Span(json: try parse(#"{"spanId":"b","name":"llm_request","attributes":{"gen_ai.request.model":"gpt-4o","gen_ai.provider.name":"openai","gen_ai.usage.input_tokens":10}}"#), index: 0)]
+        let lines = SessionCost.lines(plan: .scale, room: RoomUsage(json: try parse(room)), spans: spans, metrics: [], logs: [],
+                                      transcriptItems: 0, noiseCancellation: true)
+        #expect(lines.first { $0.item.hasPrefix("Agent session") }?.cost == 0)
+        #expect(lines.first { $0.item.hasPrefix("LLM gpt-4o") }?.cost == nil)
+        #expect(lines.first { $0.item == "Noise cancellation" }?.quantity == "25.4 min")
+    }
+
+    @Test func formatsFractionsOfACent() {
+        #expect(Format.dollars(0) == "$0.00")
+        #expect(Format.dollars(1.234) == "$1.23")
+        #expect(Format.dollars(0.0004) == "$0.00040")
+        #expect(Format.dollars(0.012) == "$0.012")
+    }
+}
+
+@Suite struct LessonFlagTests {
+    private func parse(_ text: String) throws -> JSONValue { JSONValue(any: try JSONSerialization.jsonObject(with: Data(text.utf8))) }
+
+    @Test func aPressFlagsTheTurnBeingSpokenOrTheOneBefore() throws {
+        let transcript = try [
+            #"{"id":"1","message":{"role":"ASSISTANT","text":"E Lei, di dov'è?","startedSpeakingAt":"2026-11-17T17:00:00Z","stoppedSpeakingAt":"2026-11-17T17:00:02Z"}}"#,
+            #"{"id":"2","message":{"role":"USER","text":"Il L D D dove?","startedSpeakingAt":"2026-11-17T17:00:05Z","stoppedSpeakingAt":"2026-11-17T17:00:07Z"}}"#,
+        ].enumerated().map { TranscriptItem(json: try parse($1), index: $0) }
+        let logs = try [
+            #"{"id":"a","timestamp":"2026-11-17T17:00:01Z","level":"LOG_LEVEL_WARN","message":"Learner flagged this moment: flag 1, cue 003-080"}"#,
+            #"{"id":"b","timestamp":"2026-11-17T17:00:09Z","level":"LOG_LEVEL_WARN","message":"Learner flagged this moment: flag 2, cue 003-080"}"#,
+            #"{"id":"c","timestamp":"2026-11-17T17:00:09Z","level":"LOG_LEVEL_INFO","message":"Session started"}"#,
+        ].enumerated().map { LogRecord(json: try parse($1), index: $0) }
+        let flags = SessionDetail.lessonFlags(logs: logs, transcript: transcript)
+        #expect(flags.count == 2)
+        #expect(flags.allSatisfy { $0.isFromLesson })
+        #expect(flags[0].note.contains("flag 1") && flags[0].note.contains("Agent: E Lei"))
+        #expect(flags[1].note.contains("User: Il L D D dove?"))
+        #expect(flags[1].end == logs[1].timestamp)  // reaches the press
+    }
+
+    @Test func readsSessionTags() throws {
+        let session = try #require(LiveKitSession(json: try parse(#"{"sessionId":"RM_1","tags":["flagged:learner"]}"#)))
+        #expect(session.flaggedInLesson)
+        let untagged = try parse(#"{"sessionId":"RM_2","tags":[]}"#)
+        #expect(LiveKitSession(json: untagged)?.flaggedInLesson == false)
+    }
+}

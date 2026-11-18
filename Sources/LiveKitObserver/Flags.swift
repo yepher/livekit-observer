@@ -7,6 +7,14 @@ struct Flag: Codable, Identifiable, Hashable, Sendable {
     var start: Date
     var end: Date
     var note: String
+    /// Set for flags read from the session itself (the lesson page's flag button), which are not saved here.
+    var fromLesson: Bool? = nil
+
+    var isFromLesson: Bool { fromLesson == true }
+
+    /// The session tag and log message the agent writes when the lesson page's flag button is pressed.
+    static let lessonTag = "flagged:learner"
+    static let lessonLogPrefix = "Learner flagged this moment"
 
     /// Leeway around a flag for things LiveKit reports at a single instant, such as log lines.
     static let slack: TimeInterval = 0.5
@@ -70,8 +78,28 @@ extension SessionDetail {
     func saveFlags() {
         flags.sort { $0.start < $1.start }
         let key = Self.flagsKey(row.id)
-        if flags.isEmpty { UserDefaults.standard.removeObject(forKey: key) }
-        else if let data = try? JSONEncoder().encode(flags) { UserDefaults.standard.set(data, forKey: key) }
+        let saved = flags.filter { !$0.isFromLesson }
+        if saved.isEmpty { UserDefaults.standard.removeObject(forKey: key) }
+        else if let data = try? JSONEncoder().encode(saved) { UserDefaults.standard.set(data, forKey: key) }
+    }
+
+    /// Flags pressed on the lesson page, read from the agent's log. Each covers the turn being spoken
+    /// when it was pressed, or else the turn just before it, since a flag usually follows what was heard.
+    nonisolated static func lessonFlags(logs: [LogRecord], transcript: [TranscriptItem]) -> [Flag] {
+        let turns = transcript.filter { $0.kind == "message" && ($0.role == .agent || $0.role == .user) && $0.start != nil }
+        return logs.compactMap { log -> Flag? in
+            guard log.message.hasPrefix(Flag.lessonLogPrefix), let at = log.timestamp else { return nil }
+            let detail = log.message.dropFirst(Flag.lessonLogPrefix.count).trimmingCharacters(in: CharacterSet(charactersIn: ": "))
+            let turn = turns.last { $0.start! <= at && ($0.stoppedSpeakingAt ?? $0.start!) >= at } ?? turns.last { $0.start! <= at }
+            var note = "Flagged in the lesson"
+            if !detail.isEmpty { note += " (\(detail))" }
+            guard let turn, let start = turn.start else {
+                return Flag(start: at.addingTimeInterval(-1.5), end: at, note: note, fromLesson: true)
+            }
+            // Reach to the press itself, so the moment between the turn and the press is shaded too.
+            let end = max(turn.stoppedSpeakingAt ?? start.addingTimeInterval(1), at)
+            return Flag(start: start, end: end, note: note + " · " + label(for: turn), fromLesson: true)
+        }
     }
 
     /// Flags the spoken turn under `date`, or a second and a half around it when nobody was speaking.
@@ -91,6 +119,12 @@ extension SessionDetail {
         return flag
     }
 
+    /// Replaces the flags read from the session, keeping the ones made on this Mac.
+    func applyLessonFlags() {
+        flags = flags.filter { !$0.isFromLesson } + Self.lessonFlags(logs: logs, transcript: transcript)
+        flags.sort { $0.start < $1.start }
+    }
+
     func removeFlag(_ id: Flag.ID) {
         flags.removeAll { $0.id == id }
         saveFlags()
@@ -103,7 +137,7 @@ extension SessionDetail {
     }
 
     /// A starting note for a flagged turn: who spoke and what was said.
-    static func label(for item: TranscriptItem) -> String {
+    nonisolated static func label(for item: TranscriptItem) -> String {
         let text = item.text.count > 60 ? item.text.prefix(59) + "…" : Substring(item.text)
         return "\(item.role == .agent ? "Agent" : "User"): \(text)"
     }

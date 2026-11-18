@@ -73,9 +73,13 @@ struct SessionListView: View {
                 ForEach(DaySection.group(model.visibleRows)) { day in
                     Section(day.title) {
                         ForEach(day.rows) { row in
-                            SessionRowView(row: row, agentName: model.agentNames[row.id], liveKitLoaded: model.liveKitLoaded).tag(row.id)
+                            SessionRowView(row: row, agentName: model.agentNames[row.id], liveKitLoaded: model.liveKitLoaded,
+                                           flagged: model.isFlagged(row.id), noted: model.hasNotes(row.id),
+                                           lessonFlags: model.flaggedInLesson(row) ? max(model.lessonFlagCounts[row.id] ?? 1, 1) : 0).tag(row.id)
                                 .onAppear { model.requestAgentName(for: row) }
                                 .contextMenu {
+                                    Button(model.isFlagged(row.id) ? "Unflag Session" : "Flag Session") { model.toggleSessionFlag(row.id) }
+                                    Divider()
                                     Button("Open in LiveKit Dashboard") { model.openDashboard(row.id) }
                                         .disabled(row.session == nil || model.projectId == nil)
                                     Button("Copy Session ID") { AppModel.copy(row.id) }
@@ -89,8 +93,11 @@ struct SessionListView: View {
                 if model.loading && model.rows.isEmpty { ProgressView("Loading sessions…") }
                 else if !model.loading && model.visibleRows.isEmpty { ContentUnavailableView("No sessions", systemImage: "tray") }
             }
-            Toggle("Only sessions with a recording", isOn: $model.onlyWithRecording)
-                .toggleStyle(.checkbox).font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Only sessions with a recording", isOn: $model.onlyWithRecording)
+                Toggle("Only flagged sessions", isOn: $model.onlyFlagged)
+            }
+            .toggleStyle(.checkbox).font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading)
         }
         .searchable(text: $model.filter, placement: .sidebar, prompt: "Room or session ID")
         .navigationTitle("Sessions")
@@ -128,11 +135,17 @@ struct SessionRowView: View {
     let row: SessionRow
     let agentName: String?
     let liveKitLoaded: Bool
+    var flagged = false
+    var noted = false
+    /// Moments flagged from the lesson page.
+    var lessonFlags = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            HStack {
+            HStack(spacing: 4) {
+                if flagged { Image(systemName: "flag.fill").foregroundStyle(.orange).help("Flagged session") }
                 Text(row.title).font(.headline).lineLimit(1).truncationMode(.middle)
+                if noted { Image(systemName: "paperclip").foregroundStyle(.secondary).help("Has flags with notes") }
                 Spacer()
                 Text(Format.duration(row.duration)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
@@ -149,6 +162,7 @@ struct SessionRowView: View {
             HStack(spacing: 6) {
                 if row.recording != nil { Tag(text: "Recording", symbol: "waveform", color: .green) }
                 if row.session?.hasDetailData == true { Tag(text: "Insights", symbol: "chart.bar.xaxis", color: .blue) }
+                if lessonFlags > 0 { Tag(text: lessonFlags == 1 ? "1 flag" : "\(lessonFlags) flags", symbol: "flag.fill", color: .orange).help("Moments flagged from the lesson page") }
                 if row.session?.status == "active" { Tag(text: "Live", symbol: "dot.radiowaves.left.and.right", color: .red) }
                 if row.session == nil && liveKitLoaded { Tag(text: "Recording only", symbol: "clock.badge.questionmark", color: .gray) }
             }

@@ -114,5 +114,10 @@ enum Format {
         return (delta < 0 ? "-" : "") + duration(abs(delta))
     }
     static func ms(_ value: Double?) -> String { value.map { "\(Int($0.rounded())) ms" } ?? "–" }
+    /// Dollars with enough decimals to show a fraction of a cent.
+    static func dollars(_ value: Double) -> String {
+        let digits = value == 0 || value >= 1 ? 2 : min(6, max(2, Int((-log10(value)).rounded(.down)) + 2))
+        return "$" + String(format: "%.\(digits)f", value)
+    }
     static func bytes(_ count: Int64) -> String { ByteCountFormatter.string(fromByteCount: count, countStyle: .file) }
 }
