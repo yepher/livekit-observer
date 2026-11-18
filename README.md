@@ -2,9 +2,15 @@
 
 A macOS app for reviewing LiveKit Cloud sessions: the transcript, agent logs, traces, metrics, latency, and the session's audio, with per-channel mel spectrograms. It works with any LiveKit Cloud project and any agent.
 
+## Install
+
+Download the DMG from the [latest release](https://github.com/yepher/livekit-observer/releases/latest), open it, and drag **LiveKit Observer** to Applications. Releases are signed with a Developer ID certificate and notarized by Apple.
+
+The app checks for updates once a day and installs them in the background when you quit it. Choose **LiveKit Observer › Check for Updates…** to check now.
+
 ## Requirements
 
-- macOS 15 or later, Xcode, and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`) to build.
+- macOS 15 or later. To build: Xcode, and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`) to build.
 - The LiveKit CLI 2.19.4 or later (`brew install livekit-cli`).
 - A LiveKit Cloud user with access to the project. Session data needs the Admin role.
 - Agent observability turned on for the project, for transcripts, logs, traces, and LiveKit's session recordings.
@@ -65,6 +71,26 @@ Otherwise its channels are labeled left and right.
 - **Playback.** Space plays and pauses wherever the focus is in the session window, except while typing in a field. When a session has both an egress recording and LiveKit's recording, the player switches between them at the same moment.
 - **Spectrogram.** It shows a log-mel spectrogram (80 bands, 50 Hz–12 kHz, 10 ms columns, a fixed −100 to −5 dBFS scale so lanes compare) for every channel of each recording on one timeline, stacked or side by side. Pick a zoom preset or pinch to zoom from 2 seconds to the whole session. Click a lane to move the playhead there; the view stays put and turns the page when playback reaches its right edge. Drag to scroll a zoomed view, or to scrub when the whole session is showing. Moving the pointer over a lane skims: a red line follows it and you hear the audio under it, as in Final Cut Pro (Playback › Skimming, ⌥S, turns it off). Ticks mark where agent (blue) and user (green) turns begin. LiveKit's recording puts the user on the left channel and the agent on the right. Egress and LiveKit's recording start at different moments on different clocks, so the app lines them up by matching their loudness and shows the difference beside each recording. If it picks the wrong spot, the ↔ menu beside Egress matches again, goes back to the reported start times, or nudges egress by 0.1 or 1 second; nudges are remembered for the session.
 - **Flags.** Right-click a spot on the spectrogram to flag the turn being spoken there (or just that moment), or right-click a transcript line, log line, or span. Playback › Flag Playhead (⌥M) flags the turn at the playhead. Each flag takes a note. Flagged stretches are shaded on the spectrogram, and the matching transcript lines, log lines, and spans are highlighted in yellow; collapsed spans that contain one show an outline flag. The transcript and logs can show only flagged lines, the overview lists every flag, and the Flags toolbar menu jumps to one. Copy for Claude includes each flag with its transcript, log lines, and spans. Flags are saved on this Mac per session. An agent can also flag moments during the session: when it logs a message starting with "Learner flagged this moment" (at any level), the app shows a flag on the turn being spoken at that time, or the turn just before it. These flags come from the session, so they aren't saved on this Mac. The list counts these flags for each session from its warning logs (cached once LiveKit has settled the session), shows an orange "N flags" label, and **Only flagged sessions** includes them. A session tagged `flagged:learner` counts too.
+
+## Releasing
+
+Pushing a version tag runs `.github/workflows/release.yml`, which builds the app, signs it with the Developer ID certificate, notarizes it, and publishes a DMG, a zip, and `appcast.xml` to GitHub Releases. Installed copies read `appcast.xml` from the latest release to update themselves (via [Sparkle](https://sparkle-project.org)).
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+A tag with a hyphen, such as `v0.3.0-beta.1`, becomes a prerelease, which installed copies don't update to. The build number is the commit count, so each release must be tagged on a later commit than the last.
+
+**One-time setup.** Run `scripts/setup-release-secrets.sh`. It creates the Sparkle update key in your Keychain, writes its public half into `Config/Info.plist` (commit that), and stores these repository secrets:
+
+| Secret | What it is |
+| --- | --- |
+| `SPARKLE_PRIVATE_KEY` | Signs each update. Back up the Keychain item "Private key for signing Sparkle updates": without it, installed copies can't update. |
+| `DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD` | Your Developer ID Application certificate, exported from Keychain Access. |
+| `NOTARY_KEY_P8_BASE64`, `NOTARY_KEY_ID`, `NOTARY_ISSUER_ID` | An App Store Connect API key with the Developer role, for notarization. |
+
+Local `./build.sh` builds can't update themselves until `Config/Info.plist` has the Sparkle key, and they disable **Check for Updates…** until then.
 
 ## Privacy
 

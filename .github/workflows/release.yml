@@ -1,0 +1,153 @@
+# Builds, signs, notarizes, and publishes LiveKit Observer when a version tag is pushed:
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# Publishes a DMG for new installs, a zip for Sparkle, and appcast.xml, which installed copies read from
+# releases/latest to update themselves. Tags with a hyphen (v0.3.0-beta.1) become prereleases, which the
+# appcast never points to. Run scripts/setup-release-secrets.sh once to create the secrets used below.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: LiveKit Observer
+  TEAM_ID: WDCGJTU726
+  SPARKLE_VERSION: 2.10.1
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # the build number is the commit count
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Work out the version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          # Sparkle compares CFBundleVersion, so it must grow with every release.
+          echo "BUILD=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+          case "$version" in *-*) echo "PRERELEASE=--prerelease" >> "$GITHUB_ENV" ;; *) echo "PRERELEASE=" >> "$GITHUB_ENV" ;; esac
+          grep -q SPARKLE_PUBLIC_KEY_NOT_SET Config/Info.plist && { echo "::error::Config/Info.plist has no Sparkle public key. Run scripts/setup-release-secrets.sh."; exit 1; } || true
+
+      - name: Import the Developer ID certificate
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$P12_PASSWORD" -A -t cert -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$keychain"
+
+      - name: Build and sign
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild archive -project LiveKitObserver.xcodeproj -scheme LiveKitObserver -configuration Release \
+            -archivePath "$RUNNER_TEMP/app.xcarchive" -destination "generic/platform=macOS" \
+            MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD" \
+            CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM="$TEAM_ID" OTHER_CODE_SIGN_FLAGS=--timestamp
+          cat > "$RUNNER_TEMP/export.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>developer-id</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Developer ID Application</string>
+            <key>teamID</key><string>$TEAM_ID</string>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/app.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" -exportPath "$RUNNER_TEMP/export"
+          mkdir -p dist
+          mv "$RUNNER_TEMP/export/$APP_NAME.app" dist/
+          codesign --verify --deep --strict --verbose=2 "dist/$APP_NAME.app"
+
+      - name: Notarize
+        env:
+          NOTARY_KEY_P8_BASE64: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          key="$RUNNER_TEMP/notary.p8"
+          echo "$NOTARY_KEY_P8_BASE64" | base64 --decode > "$key"
+          notarize() { xcrun notarytool submit "$1" --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" --wait --timeout 30m; }
+
+          # The app first, so the copies in the zip and the DMG both carry a stapled ticket.
+          ditto -c -k --keepParent "dist/$APP_NAME.app" "$RUNNER_TEMP/notarize.zip"
+          notarize "$RUNNER_TEMP/notarize.zip"
+          xcrun stapler staple "dist/$APP_NAME.app"
+
+          slug="LiveKit-Observer-$VERSION"
+          ditto -c -k --sequesterRsrc --keepParent "dist/$APP_NAME.app" "dist/$slug.zip"
+
+          staging="$RUNNER_TEMP/dmg"
+          mkdir -p "$staging"
+          cp -R "dist/$APP_NAME.app" "$staging/"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "$APP_NAME" -srcfolder "$staging" -format UDZO -ov "dist/$slug.dmg"
+          codesign --sign "Developer ID Application" --timestamp "dist/$slug.dmg"
+          notarize "dist/$slug.dmg"
+          xcrun stapler staple "dist/$slug.dmg"
+          spctl --assess --type execute --verbose "dist/$APP_NAME.app"
+          rm "$key"
+          echo "SLUG=$slug" >> "$GITHUB_ENV"
+
+      - name: Write the appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          curl -sSL "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz" | tar xJ -C "$RUNNER_TEMP"
+          key="$RUNNER_TEMP/sparkle.key"
+          (umask 077; printf '%s' "$SPARKLE_PRIVATE_KEY" > "$key")
+          signature="$("$RUNNER_TEMP/bin/sign_update" --ed-key-file "$key" "dist/$SLUG.zip")"
+          rm "$key"
+          repo="https://github.com/$GITHUB_REPOSITORY"
+          cat > dist/appcast.xml <<XML
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>$APP_NAME</title>
+              <link>$repo</link>
+              <item>
+                <title>$VERSION</title>
+                <pubDate>$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')</pubDate>
+                <sparkle:version>$BUILD</sparkle:version>
+                <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+                <sparkle:fullReleaseNotesLink>$repo/releases/tag/$GITHUB_REF_NAME</sparkle:fullReleaseNotesLink>
+                <enclosure url="$repo/releases/download/$GITHUB_REF_NAME/$SLUG.zip" type="application/octet-stream" $signature />
+              </item>
+            </channel>
+          </rss>
+          XML
+          cat dist/appcast.xml
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "$APP_NAME $VERSION" --generate-notes $PRERELEASE \
+            "dist/$SLUG.dmg" "dist/$SLUG.zip" dist/appcast.xml
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true

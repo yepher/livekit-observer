@@ -8,17 +8,25 @@ settings:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.1
 targets:
   LiveKitObserver:
     type: application
     platform: macOS
     sources: [Sources/LiveKitObserver]
+    dependencies:
+      - package: Sparkle
     settings:
       base:
         PRODUCT_NAME: LiveKit Observer
         PRODUCT_MODULE_NAME: LiveKitObserver
         PRODUCT_BUNDLE_IDENTIFIER: com.yepher.livekit-observer
         GENERATE_INFOPLIST_FILE: YES
+        # Sparkle's feed URL and public key; merged with the generated Info.plist.
+        INFOPLIST_FILE: Config/Info.plist
         INFOPLIST_KEY_CFBundleDisplayName: LiveKit Observer
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
@@ -27,6 +35,11 @@ targets:
         ENABLE_HARDENED_RUNTIME: NO
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
+      configs:
+        # Required for notarization; the app needs no extra entitlements under it. Debug stays off so
+        # the unit tests can load into the app.
+        Release:
+          ENABLE_HARDENED_RUNTIME: YES
   LiveKitObserverTests:
     type: bundle.unit-test
     platform: macOS

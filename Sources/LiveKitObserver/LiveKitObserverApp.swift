@@ -4,6 +4,8 @@ import SwiftUI
 struct LiveKitObserverApp: App {
     @State private var model = AppModel()
 
+    init() { _ = Updater.shared }
+
     var body: some Scene {
         WindowGroup("LiveKit Observer") {
             ContentView()
@@ -13,6 +15,7 @@ struct LiveKitObserverApp: App {
                 .onAppear { model.handleSpaceBar() }
         }
         .commands {
+            CheckForUpdatesCommand()
             CommandMenu("Playback") {
                 // Space is handled by AppModel.handleSpaceBar, so focused lists and buttons cannot swallow it
                 // and text fields still get it.
