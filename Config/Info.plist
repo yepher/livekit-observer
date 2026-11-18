@@ -1,15 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<!-- Merged with the Info.plist Xcode generates. Holds the Sparkle update settings. -->
 <dict>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
 	<key>SUFeedURL</key>
 	<string>https://github.com/yepher/livekit-observer/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>SPARKLE_PUBLIC_KEY_NOT_SET</string>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
-	<key>SUAutomaticallyUpdate</key>
-	<true/>
+	<string>ayXyG4rzJLppWsQ6R6PA1jt5i34oALKEj+V/j3T7g6U=</string>
 </dict>
 </plist>

@@ -88,7 +88,7 @@ A tag with a hyphen, such as `v0.3.0-beta.1`, becomes a prerelease, which instal
 | --- | --- |
 | `SPARKLE_PRIVATE_KEY` | Signs each update. Back up the Keychain item "Private key for signing Sparkle updates": without it, installed copies can't update. |
 | `DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD` | Your Developer ID Application certificate, exported from Keychain Access. |
-| `NOTARY_KEY_P8_BASE64`, `NOTARY_KEY_ID`, `NOTARY_ISSUER_ID` | An App Store Connect API key with the Developer role, for notarization. |
+| `NOTARY_APPLE_ID`, `NOTARY_PASSWORD` | Your Apple ID and an app-specific password, for notarization. |
 
 Local `./build.sh` builds can't update themselves until `Config/Info.plist` has the Sparkle key, and they disable **Check for Updates…** until then.
 

@@ -83,13 +83,10 @@ jobs:
 
       - name: Notarize
         env:
-          NOTARY_KEY_P8_BASE64: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
-          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
         run: |
-          key="$RUNNER_TEMP/notary.p8"
-          echo "$NOTARY_KEY_P8_BASE64" | base64 --decode > "$key"
-          notarize() { xcrun notarytool submit "$1" --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" --wait --timeout 30m; }
+          notarize() { xcrun notarytool submit "$1" --apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_PASSWORD" --team-id "$TEAM_ID" --wait --timeout 30m; }
 
           # The app first, so the copies in the zip and the DMG both carry a stapled ticket.
           ditto -c -k --keepParent "dist/$APP_NAME.app" "$RUNNER_TEMP/notarize.zip"
@@ -108,7 +105,6 @@ jobs:
           notarize "dist/$slug.dmg"
           xcrun stapler staple "dist/$slug.dmg"
           spctl --assess --type execute --verbose "dist/$APP_NAME.app"
-          rm "$key"
           echo "SLUG=$slug" >> "$GITHUB_ENV"
 
       - name: Write the appcast

@@ -6,7 +6,7 @@
 # 1. Creates the Sparkle update key (or reuses the one already in your Keychain), writes its public half
 #    into Config/Info.plist, and stores the private half as the SPARKLE_PRIVATE_KEY secret.
 # 2. Stores your Developer ID Application certificate, exported from Keychain Access as a .p12.
-# 3. Stores an App Store Connect API key (.p8) for notarization.
+# 3. Stores your Apple ID and an app-specific password, for notarization.
 #
 # Secrets go to GitHub with `gh secret set` over stdin; nothing is printed or left on disk.
 # Keep a backup of the Sparkle private key (Keychain item "Private key for signing Sparkle updates"):
@@ -39,15 +39,12 @@ printf '%s' "$p12_password" | gh secret set DEVELOPER_ID_P12_PASSWORD
 echo "Stored. You can delete $p12 now."
 
 echo
-echo "== App Store Connect API key, for notarization"
-echo "At https://appstoreconnect.apple.com/access/integrations/api create a Team key with the Developer role"
-echo "and download its .p8 (Apple lets you download it once)."
-printf "Path to the .p8: "; read -r p8
-printf "Key ID: "; read -r key_id
-printf "Issuer ID: "; read -r issuer_id
-base64 -i "$p8" | gh secret set NOTARY_KEY_P8_BASE64
-printf '%s' "$key_id" | gh secret set NOTARY_KEY_ID
-printf '%s' "$issuer_id" | gh secret set NOTARY_ISSUER_ID
+echo "== Notarization"
+echo "Use an app-specific password from https://account.apple.com (Sign-In and Security > App-Specific Passwords)."
+printf "Apple ID email: "; read -r apple_id
+printf "App-specific password: "; stty -echo; read -r app_password; stty echo; echo
+printf '%s' "$apple_id" | gh secret set NOTARY_APPLE_ID
+printf '%s' "$app_password" | gh secret set NOTARY_PASSWORD
 
 echo
 echo "Done. Commit Config/Info.plist, then release with: git tag v0.2.0 && git push origin v0.2.0"
