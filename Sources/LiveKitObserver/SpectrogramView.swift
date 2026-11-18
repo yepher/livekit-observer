@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Mel spectrograms of each recording, one lane per channel, lined up on the session's wall clock.
@@ -12,6 +13,10 @@ struct SpectrogramView: View {
     @GestureState private var pinch: CGFloat = 1
     /// The left edge of the zoomed view once it has been placed; nil puts the playhead a quarter of the way in.
     @State private var scrollStart: Date?
+    /// Whether the pointer is over the lanes, so horizontal scrolling there moves the view.
+    @State private var hovering = false
+    @State private var lanesWidth: CGFloat = 0
+    @State private var scrollMonitor: Any?
     static let shortestSpan: TimeInterval = 2
 
     enum Layout: String, CaseIterable, Identifiable {
@@ -43,6 +48,8 @@ struct SpectrogramView: View {
                 Group {
                     if layout == .stacked { VStack(spacing: 12) { groups } } else { HStack(alignment: .top, spacing: 12) { groups } }
                 }
+                .onHover { hovering = $0 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { lanesWidth = $0 }
                 .simultaneousGesture(
                     MagnifyGesture()
                         .updating($pinch) { value, state, _ in state = value.magnification }
@@ -60,6 +67,41 @@ struct SpectrogramView: View {
         .task(id: detail.sources.map(\.id)) { await model.analyze(detail) }
         .onChange(of: model.player.currentTime) { old, new in follow(from: old, to: new) }
         .onChange(of: detail.row.id) { scrollStart = nil }
+        .onAppear { startScrollMonitor() }
+        .onDisappear { stopScrollMonitor() }
+    }
+
+    /// Two-finger swipes left and right (or a mouse's horizontal wheel) scroll a zoomed view, like dragging does.
+    /// SwiftUI has no horizontal scroll gesture on macOS, so this watches the app's scroll events while the pointer
+    /// is over the lanes, and takes only mostly-horizontal ones, leaving vertical scrolling alone.
+    private func startScrollMonitor() {
+        guard scrollMonitor == nil else { return }
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            scroll(by: event) ? nil : event
+        }
+    }
+
+    private func stopScrollMonitor() {
+        if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
+        scrollMonitor = nil
+    }
+
+    /// Moves the view for a horizontal scroll event over the lanes; returns whether it did.
+    private func scroll(by event: NSEvent) -> Bool {
+        let dx = event.scrollingDeltaX
+        guard hovering, dx != 0, abs(dx) > abs(event.scrollingDeltaY) else { return false }
+        let view = window
+        guard view != wholeWindow, lanesWidth > 0 else { return false }
+        // Side by side, each recording gets a share of the width.
+        let count = CGFloat(max(detail.sources.count, 1))
+        let laneWidth = layout == .stacked ? lanesWidth : (lanesWidth - 12 * (count - 1)) / count
+        let secondsPerPoint = view.upperBound.timeIntervalSince(view.lowerBound) / max(laneWidth, 1)
+        // A trackpad reports points; a mouse wheel reports lines.
+        let points = event.hasPreciseScrollingDeltas ? dx : dx * 10
+        // The content follows the fingers, as the system's scroll direction setting has already applied.
+        scrollStart = view.lowerBound.addingTimeInterval(-points * secondsPerPoint)
+        model.skimmer.end()
+        return true
     }
 
     /// The pickers and the scale legend share a row when they fit; otherwise the legend gets its own line.
@@ -95,7 +137,7 @@ struct SpectrogramView: View {
     }
 
     private var legend: some View {
-        Text("Mel scale \(Int(Spectrogram.minHz)) Hz–\(Int(Spectrogram.maxHz / 1000)) kHz · \(Int(Spectrogram.floorDB)) to \(Int(Spectrogram.ceilingDB)) dBFS · hover to skim (⌥S toggles) · click to move the playhead · drag to scroll · right-click to flag")
+        Text("Mel scale \(Int(Spectrogram.minHz)) Hz–\(Int(Spectrogram.maxHz / 1000)) kHz · \(Int(Spectrogram.floorDB)) to \(Int(Spectrogram.ceilingDB)) dBFS · hover to skim (⌥S toggles) · click to move the playhead · drag or swipe to scroll · right-click to flag")
             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 
@@ -181,10 +223,11 @@ private struct SourceLanes: View {
             }
             if let spectrogram = detail.spectrograms[source.kind] {
                 ForEach(0..<spectrogram.channels.count, id: \.self) { channel in
-                    Lane(detail: detail, spectrogram: spectrogram, channel: channel, file: source.file, start: start, window: window, pinch: pinch, anchor: anchor, canScroll: canScroll, scrollStart: $scrollStart, label: source.channelName(channel, of: spectrogram.channels.count, identical: spectrogram.identicalChannels))
+                    Lane(detail: detail, spectrogram: spectrogram, channel: channel, file: source.file, start: start, window: window, pinch: pinch, anchor: anchor, canScroll: canScroll, scrollStart: $scrollStart, label: source.channelName(channel, of: spectrogram.channels.count, identical: spectrogram.identicalChannels),
+                         ttsStatic: channel == source.agentChannel(channels: spectrogram.channels.count, identical: spectrogram.identicalChannels) ? detail.ttsStatic[source.kind] ?? [] : [])
                         .frame(minHeight: 60, maxHeight: .infinity)
                 }
-                TimeAxis(window: window, origin: origin, transcript: detail.transcript, flags: detail.flags).frame(height: 22)
+                TimeAxis(window: window, origin: origin, transcript: detail.transcript, flags: detail.flags, ttsStatic: detail.ttsStatic[source.kind] ?? []).frame(height: 22)
             } else if let error = detail.spectrogramErrors[source.kind] {
                 Label(error, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
                 Spacer()
@@ -246,6 +289,8 @@ private struct Lane: View {
     let canScroll: Bool
     @Binding var scrollStart: Date?
     let label: String
+    /// Possible static on this channel, outlined in red.
+    var ttsStatic: [TTSStatic] = []
     @Environment(AppModel.self) private var model
     @Environment(\.displayScale) private var scale
     @State private var image: CGImage?
@@ -269,6 +314,7 @@ private struct Lane: View {
                         .scaleEffect(x: pinch, y: 1, anchor: UnitPoint(x: anchor, y: 0.5))
                 }
                 FlagBands(flags: detail.flags, window: window, width: geo.size.width)
+                StaticBoxes(items: ttsStatic, window: window, width: geo.size.width)
                 frequencyLabels(size: geo.size)
                 Text(label).font(.caption.weight(.semibold)).foregroundStyle(.white)
                     .padding(.horizontal, 5).padding(.vertical, 2).background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
@@ -379,6 +425,7 @@ private struct TimeAxis: View {
     let origin: Date?
     let transcript: [TranscriptItem]
     let flags: [Flag]
+    var ttsStatic: [TTSStatic] = []
 
     var body: some View {
         Canvas { context, size in
@@ -388,6 +435,10 @@ private struct TimeAxis: View {
             for flag in flags where flag.end >= window.lowerBound && flag.start <= window.upperBound {
                 let left = max(x(flag.start), 0), right = min(x(flag.end), size.width)
                 context.fill(Path(CGRect(x: left, y: 0, width: max(right - left, 2), height: 3)), with: .color(Flag.color))
+            }
+            for item in ttsStatic where item.end >= window.lowerBound && item.start <= window.upperBound {
+                let left = max(x(item.start), 0), right = min(x(item.end), size.width)
+                context.fill(Path(CGRect(x: left, y: 3, width: max(right - left, 2), height: 3)), with: .color(TTSStatic.color))
             }
             for item in transcript where item.role == .agent || item.role == .user {
                 guard let start = item.start, window.contains(start) else { continue }
@@ -419,6 +470,40 @@ private struct Skimline: View {
                 .offset(x: width * date.timeIntervalSince(window.lowerBound) / span)
                 .allowsHitTesting(false)
         }
+    }
+}
+
+extension TTSStatic {
+    static let color = Color.red
+}
+
+/// Possible TTS static, outlined in red, labeled when there's room.
+private struct StaticBoxes: View {
+    let items: [TTSStatic]
+    let window: ClosedRange<Date>
+    let width: CGFloat
+
+    var body: some View {
+        let span = window.upperBound.timeIntervalSince(window.lowerBound)
+        ZStack(alignment: .topLeading) {
+            ForEach(items.filter { $0.end >= window.lowerBound && $0.start <= window.upperBound }) { item in
+                let left = max(width * item.start.timeIntervalSince(window.lowerBound) / span, 0)
+                let right = min(width * item.end.timeIntervalSince(window.lowerBound) / span, width)
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(TTSStatic.color, lineWidth: 2)
+                    .background(TTSStatic.color.opacity(0.10), in: RoundedRectangle(cornerRadius: 3))
+                    .overlay(alignment: .bottomLeading) {
+                        if right - left >= 64 {
+                            Text("TTS static").font(.caption2.weight(.bold)).foregroundStyle(.white)
+                                .padding(.horizontal, 4).padding(.vertical, 1).background(TTSStatic.color, in: RoundedRectangle(cornerRadius: 2))
+                                .padding(3)
+                        }
+                    }
+                    .frame(width: max(right - left, 4))
+                    .offset(x: left)
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 

@@ -20,13 +20,16 @@ struct Spectrogram: Sendable {
     let frameCount: Int
     /// The file stores the same signal in every channel (a mono mix written as stereo).
     let identicalChannels: Bool
+    /// Per channel, the measures StaticDetector uses, one value per column.
+    let noise: [NoiseTrack]
     var duration: TimeInterval { Double(frameCount) * hop }
 
-    init(hop: TimeInterval, channels: [[UInt8]], frameCount: Int, identicalChannels: Bool) {
+    init(hop: TimeInterval, channels: [[UInt8]], frameCount: Int, identicalChannels: Bool, noise: [NoiseTrack] = []) {
         self.hop = hop
         self.channels = channels
         self.frameCount = frameCount
         self.identicalChannels = identicalChannels
+        self.noise = noise
     }
 
     /// Decodes `file` in chunks (a long session is hundreds of MB as PCM) and analyzes every channel.
@@ -42,6 +45,7 @@ struct Spectrogram: Sendable {
         // Pad by half a window so column i is centered on i × hop.
         var pending = Array(repeating: [Float](repeating: 0, count: analyzer.size / 2), count: channelCount)
         var output = Array(repeating: [UInt8](), count: channelCount)
+        var noise = Array(repeating: NoiseTrack(), count: channelCount)
         // Energy of each channel's difference from channel 0, against channel 0's energy.
         var difference: Float = 0, signal: Float = 0
         while audio.framePosition < audio.length {
@@ -61,7 +65,7 @@ struct Spectrogram: Sendable {
             for c in 0..<channelCount {
                 var start = 0
                 while pending[c].count - start >= analyzer.size {
-                    pending[c].withUnsafeBufferPointer { analyzer.column(from: $0.baseAddress! + start, into: &output[c]) }
+                    pending[c].withUnsafeBufferPointer { analyzer.column(from: $0.baseAddress! + start, into: &output[c], noise: &noise[c]) }
                     start += analyzer.hop
                 }
                 pending[c].removeFirst(start)
@@ -74,7 +78,8 @@ struct Spectrogram: Sendable {
             hop: Double(analyzer.hop) / format.sampleRate,
             channels: identical ? [output[0]] : output,
             frameCount: frames,
-            identicalChannels: identical
+            identicalChannels: identical,
+            noise: identical ? [noise[0]] : noise
         )
     }
 
@@ -182,6 +187,13 @@ private final class MelAnalyzer {
     /// Per band: first FFT bin and its triangular weights.
     private let filters: [(start: Int, weights: [Float])]
     private let scale: Float
+    // For the static measures.
+    private let windowEnergy: Float
+    private let lowBins: Int
+    private let quefrencies: ClosedRange<Int>
+    private var logMagnitude: [Float]
+    private var cepReal: [Float]
+    private var cepImag: [Float]
 
     init(sampleRate: Float) {
         hop = Int((sampleRate / 100).rounded())  // 10 ms
@@ -199,6 +211,13 @@ private final class MelAnalyzer {
         let windowSum = window.reduce(0, +)
         scale = 1 / (windowSum * windowSum)
         let binHz = sampleRate / Float(n)
+        windowEnergy = window.reduce(0) { $0 + $1 * $1 }
+        lowBins = min(n / 2, Int(NoiseTrack.lowShareHz / binHz))
+        // Pitch periods of 2.5–12.5 ms (80–400 Hz), where voiced speech puts its cepstral peak.
+        quefrencies = Int(sampleRate * 0.0025)...min(n / 2 - 1, Int(sampleRate * 0.0125))
+        logMagnitude = [Float](repeating: 0, count: n)
+        cepReal = [Float](repeating: 0, count: n / 2)
+        cepImag = [Float](repeating: 0, count: n / 2)
         let edges = Self.edges(bands: Spectrogram.bands, minHz: Spectrogram.minHz, maxHz: min(Spectrogram.maxHz, sampleRate / 2))
         filters = (0..<Spectrogram.bands).map { b in
             let (lo, mid, hi) = (edges[b], edges[b + 1], edges[b + 2])
@@ -225,7 +244,7 @@ private final class MelAnalyzer {
         return (0..<(bands + 2)).map { hz(lo + (hi - lo) * Float($0) / Float(bands + 1)) }
     }
 
-    func column(from samples: UnsafePointer<Float>, into output: inout [UInt8]) {
+    func column(from samples: UnsafePointer<Float>, into output: inout [UInt8], noise: inout NoiseTrack) {
         let half = size / 2
         vDSP_vmul(samples, 1, window, 1, &frame, 1, vDSP_Length(size))
         real.withUnsafeMutableBufferPointer { r in
@@ -249,6 +268,50 @@ private final class MelAnalyzer {
             let db = 10 * log10(energy / max(total, 1e-9) * scale + 1e-20)
             output.append(UInt8(max(0, min(255, (db - Spectrogram.floorDB) / span * 255))))
         }
+        appendNoiseMeasures(to: &noise)
+    }
+
+    /// Loudness, how much of it sits below 2.5 kHz, and cepstral peak prominence: the strength of the evenly
+    /// spaced harmonics a voice makes, which static lacks. Uses the power spectrum `column` just computed.
+    private func appendNoiseMeasures(to noise: inout NoiseTrack) {
+        let half = size / 2
+        // Parseval: a one-sided spectrum holds half of n times the windowed frame's energy, and vDSP's ×2
+        // scaling makes `power` 4× that, so the frame's mean square is total / (2n), normalized by the window.
+        var total: Float = 0, low: Float = 0
+        for k in 1...half { total += power[k] }
+        for k in 1...max(1, lowBins) { low += power[k] }
+        noise.level.append(10 * log10(total / (2 * Float(size) * windowEnergy) + 1e-12))
+        noise.lowShare.append(total > 0 ? low / total : 0)
+
+        // Real cepstrum: the FFT of the log magnitude spectrum, mirrored so it is real and even.
+        for k in 0...half { logMagnitude[k] = 0.5 * log(power[k] + 1e-18) }
+        for k in 1..<half { logMagnitude[size - k] = logMagnitude[k] }
+        var prominence: Float = 0
+        cepReal.withUnsafeMutableBufferPointer { r in
+            cepImag.withUnsafeMutableBufferPointer { i in
+                var split = DSPSplitComplex(realp: r.baseAddress!, imagp: i.baseAddress!)
+                logMagnitude.withUnsafeBufferPointer {
+                    $0.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: half) { vDSP_ctoz($0, 2, &split, 1, vDSP_Length(half)) }
+                }
+                vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+                // vDSP doubles the result and the inverse transform divides by n; the packed slot 0 is unused here.
+                let norm = 1 / (2 * Float(size))
+                // Peak above the straight line fitted through the pitch range.
+                let q = quefrencies
+                var sx: Float = 0, sy: Float = 0, sxx: Float = 0, sxy: Float = 0
+                var peak: Float = -.infinity, peakAt = q.lowerBound
+                for j in q {
+                    let y = abs(r[j]) * norm, x = Float(j)
+                    sx += x; sy += y; sxx += x * x; sxy += x * y
+                    if y > peak { peak = y; peakAt = j }
+                }
+                let count = Float(q.count)
+                let slope = (count * sxy - sx * sy) / max(count * sxx - sx * sx, 1e-9)
+                let intercept = (sy - slope * sx) / count
+                prominence = peak - (slope * Float(peakAt) + intercept)
+            }
+        }
+        noise.harmonicity.append(prominence)
     }
 }
 

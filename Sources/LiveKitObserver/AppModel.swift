@@ -62,6 +62,14 @@ struct RecordingSource: Identifiable, Hashable, Sendable {
         if kind == .observability || userLeftAgentRight { return channel == 0 ? "User (left)" : "Agent (right)" }
         return channel == 0 ? "Left" : "Right"
     }
+
+    /// The channel holding the agent's audio: the right one when the layout is known, the only one in a mix,
+    /// or nil when egress doesn't separate the agent.
+    func agentChannel(channels count: Int, identical: Bool) -> Int? {
+        if identical || count == 1 { return 0 }
+        guard count == 2, kind == .observability || userLeftAgentRight else { return nil }
+        return 1
+    }
 }
 
 /// The detail of one session, loaded on selection.
@@ -70,7 +78,7 @@ final class SessionDetail {
     let row: SessionRow
     var transcript: [TranscriptItem] = []
     var logs: [LogRecord] = []
-    var spans: [Span] = []
+    var spans: [Span] = [] { didSet { findTTSStatic() } }
     var metrics: [MetricPoint] = []
     /// Participants' connected time and bandwidth, for the cost breakdown.
     var room: RoomUsage?
@@ -81,17 +89,39 @@ final class SessionDetail {
     var loadingObservability = false
     var loadingAudio = false
     var audioSource = ""
-    var sources: [RecordingSource] = []
+    var sources: [RecordingSource] = [] { didSet { findTTSStatic() } }
     var activeSource: RecordingSource.Kind?
-    var spectrograms: [RecordingSource.Kind: Spectrogram] = [:]
+    var spectrograms: [RecordingSource.Kind: Spectrogram] = [:] { didSet { findTTSStatic() } }
     var spectrogramErrors: [RecordingSource.Kind: String] = [:]
     var analyzing: Set<RecordingSource.Kind> = []
     /// Corrections to each recording's reported start time, found by matching the recordings' audio.
-    var originCorrection: [RecordingSource.Kind: TimeInterval] = [:]
+    var originCorrection: [RecordingSource.Kind: TimeInterval] = [:] { didSet { findTTSStatic() } }
     /// How the egress recording was lined up with LiveKit's, shown beside it.
     var alignment: Alignment = .reported
     /// Stretches marked while reviewing, highlighted in every view; saved per session.
     var flags: [Flag] = []
+    /// Possible static in the agent's TTS audio, per recording, on the session's clock.
+    private(set) var ttsStatic: [RecordingSource.Kind: [TTSStatic]] = [:]
+
+    /// The session's possible TTS static, from LiveKit's recording when there is one.
+    var ttsStaticFound: [TTSStatic] { ttsStatic[.observability] ?? ttsStatic[.egress] ?? [] }
+    /// Whether any recording's audio has been checked for TTS static yet.
+    var ttsStaticChecked: Bool { !ttsStatic.isEmpty }
+
+    /// Checks each analyzed recording's agent channel during the TTS lines in the traces.
+    private func findTTSStatic() {
+        let lines = Span.ttsLines(spans)
+        var found: [RecordingSource.Kind: [TTSStatic]] = [:]
+        if !lines.isEmpty {
+            for source in sources {
+                guard let spectrogram = spectrograms[source.kind], let origin = origin(of: source),
+                      let channel = source.agentChannel(channels: spectrogram.noise.count, identical: spectrogram.identicalChannels),
+                      channel < spectrogram.noise.count else { continue }
+                found[source.kind] = StaticDetector.find(in: spectrogram.noise[channel], hop: spectrogram.hop, origin: origin, lines: lines)
+            }
+        }
+        if found != ttsStatic { ttsStatic = found }
+    }
 
     enum Alignment { case reported, byAudio, byHand, noMatch }
 

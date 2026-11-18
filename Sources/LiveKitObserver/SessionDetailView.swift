@@ -180,8 +180,16 @@ struct OverviewView: View {
             if let i = detail.insights {
                 VStack(alignment: .leading, spacing: 20) {
                     if !detail.flags.isEmpty { FlagsBox(detail: detail, origin: origin) }
+                    findings("Possible TTS static", items: detail.ttsStaticFound.map {
+                        Finding(date: $0.start, text: String(format: "%.1f s at %.0f dB  ", $0.duration, $0.level) + ($0.text.isEmpty ? "(line text not recorded)" : "“\($0.text)”"))
+                    }, more: { showTab(.spectrogram) })
                     Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
-                        GridRow { stat("Agent turns", "\(i.agentTurns)"); stat("User turns", "\(i.userTurns)"); stat("Interrupted", "\(i.interruptions)"); stat("Warnings / errors", "\(i.problems.count)") }
+                        GridRow {
+                            stat("Agent turns", "\(i.agentTurns)"); stat("User turns", "\(i.userTurns)"); stat("Interrupted", "\(i.interruptions)"); stat("Warnings / errors", "\(i.problems.count)")
+                            stat("TTS static", detail.ttsStaticChecked ? "\(detail.ttsStaticFound.count)" : "…",
+                                 color: detail.ttsStaticFound.isEmpty ? .primary : TTSStatic.color)
+                                .help(detail.ttsStaticChecked ? "Stretches of the agent's TTS audio that sound like static (see the red boxes on the spectrogram)" : "Found once the recording has been analyzed")
+                        }
                     }
                     GroupBox("Latency") {
                         Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 6) {
@@ -219,8 +227,8 @@ struct OverviewView: View {
         detail.transcript.filter { $0.role == .agent }.compactMap(\.e2eLatencyMs).enumerated().map { ($0 + 1, $1) }
     }
 
-    private func stat(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading) { Text(value).font(.title2.weight(.semibold).monospacedDigit()); Text(label).font(.caption).foregroundStyle(.secondary) }
+    private func stat(_ label: String, _ value: String, color: Color = .primary) -> some View {
+        VStack(alignment: .leading) { Text(value).font(.title2.weight(.semibold).monospacedDigit()).foregroundStyle(color); Text(label).font(.caption).foregroundStyle(.secondary) }
     }
     private func header(_ text: String) -> some View { Text(text).font(.caption).foregroundStyle(.secondary) }
     @ViewBuilder private func latency(_ label: String, _ s: SessionInsights.Stat?) -> some View {

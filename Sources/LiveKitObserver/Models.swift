@@ -191,6 +191,25 @@ struct Span: Identifiable, Hashable, Sendable {
     }
 }
 
+extension Span {
+    /// Time allowed after a TTS line's audio should have finished, for playout delay.
+    static let ttsPlayoutSlack: TimeInterval = 0.3
+
+    /// The lines the agent sent to TTS, each from its request until its audio should have finished playing:
+    /// the request's start, plus the time to its first audio, plus the audio's length (from `lk.tts_metrics`).
+    static func ttsLines(_ spans: [Span]) -> [TTSLine] {
+        var seen = Set<String>()
+        return spans.compactMap { span in
+            guard span.name == "tts_request", let start = span.start, let metrics = span.attributes["lk.tts_metrics"],
+                  let audio = metrics["audio_duration"]?.double, audio > 0 else { return nil }
+            if let id = metrics["request_id"]?.string, !seen.insert(id).inserted { return nil }
+            let ttfb = max(metrics["ttfb"]?.double ?? 0, 0)
+            return TTSLine(start: start, end: start.addingTimeInterval(ttfb + audio + ttsPlayoutSlack),
+                           text: span.attributes["lk.pii.input_text"]?.string ?? "")
+        }
+    }
+}
+
 struct MetricPoint: Identifiable, Hashable, Sendable {
     let id: String
     let name: String

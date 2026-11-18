@@ -388,3 +388,75 @@ private func json(_ text: String) throws -> JSONValue { try JSONValue.parse(Data
         #expect(LiveKitSession(json: untagged)?.flaggedInLesson == false)
     }
 }
+
+@Suite struct StaticDetectorTests {
+    let origin = Date(timeIntervalSince1970: 1_800_000_000)
+    let hop = 0.01
+
+    /// A 10-second agent channel: quiet, except `seconds` of the given sound starting at 3 s.
+    private func track(level: (Int) -> Float, harmonicity: Float, lowShare: Float = 0.95, seconds: Double = 2) -> NoiseTrack {
+        var t = NoiseTrack()
+        for i in 0..<1000 {
+            let inside = i >= 300 && i < 300 + Int(seconds / hop)
+            t.level.append(inside ? level(i) : -90)
+            t.harmonicity.append(inside ? harmonicity : 0.04)
+            t.lowShare.append(inside ? lowShare : 0.5)
+        }
+        return t
+    }
+    private func line(_ from: Double, _ to: Double) -> TTSLine {
+        TTSLine(start: origin.addingTimeInterval(from), end: origin.addingTimeInterval(to), text: "Ma")
+    }
+
+    @Test func findsSteadyStaticInATTSLine() throws {
+        let found = StaticDetector.find(in: track(level: { _ in -10 }, harmonicity: 0.04), hop: hop, origin: origin, lines: [line(2.5, 6)])
+        let hit = try #require(found.first)
+        #expect(found.count == 1)
+        #expect(abs(hit.start.timeIntervalSince(origin) - 3) < 0.25)
+        #expect(abs(hit.end.timeIntervalSince(origin) - 5) < 0.25)
+        #expect(hit.text == "Ma")
+        #expect(abs(hit.level - -10) < 1)
+    }
+
+    @Test func ignoresStaticOutsideTTSLines() {
+        // The learner's microphone or a played-back clip can be noisy; only TTS audio is checked.
+        #expect(StaticDetector.find(in: track(level: { _ in -10 }, harmonicity: 0.04), hop: hop, origin: origin, lines: [line(6, 9)]).isEmpty)
+    }
+
+    @Test func ignoresSpeech() {
+        // Voiced: strong harmonics.
+        #expect(StaticDetector.find(in: track(level: { _ in -12 }, harmonicity: 0.14), hop: hop, origin: origin, lines: [line(2.5, 6)]).isEmpty)
+        // Syllables: the level swings by tens of dB every fifth of a second.
+        let syllables = track(level: { i in i % 20 < 10 ? -12 : -45 }, harmonicity: 0.04)
+        #expect(StaticDetector.find(in: syllables, hop: hop, origin: origin, lines: [line(2.5, 6)]).isEmpty)
+        // Hiss-like consonants: energy mostly above 2.5 kHz.
+        #expect(StaticDetector.find(in: track(level: { _ in -20 }, harmonicity: 0.04, lowShare: 0.2), hop: hop, origin: origin, lines: [line(2.5, 6)]).isEmpty)
+    }
+
+    @Test func ignoresQuietAndBriefNoise() {
+        #expect(StaticDetector.find(in: track(level: { _ in -70 }, harmonicity: 0.04), hop: hop, origin: origin, lines: [line(2.5, 6)]).isEmpty)
+        #expect(StaticDetector.find(in: track(level: { _ in -10 }, harmonicity: 0.04, seconds: 0.25), hop: hop, origin: origin, lines: [line(2.5, 6)]).isEmpty)
+    }
+
+    @Test func readsTTSLinesFromTracesOncePerRequest() throws {
+        let spans = try [
+            #"{"spanId":"a","name":"tts_request","startTime":"2026-11-14T14:11:37.087Z","attributes":{"lk.pii.input_text":"Ma","lk.tts_metrics":{"audio_duration":9.15,"ttfb":0.25,"request_id":"r1"}}}"#,
+            #"{"spanId":"b","name":"tts_request","startTime":"2026-11-14T14:11:37.088Z","attributes":{"lk.pii.input_text":"Ma","lk.tts_metrics":{"audio_duration":9.15,"ttfb":0.25,"request_id":"r1"}}}"#,
+            #"{"spanId":"c","name":"tts_request_run","startTime":"2026-11-14T14:11:37.089Z","attributes":{}}"#,
+            #"{"spanId":"d","name":"tts_request","startTime":"2026-11-14T14:11:40.000Z","attributes":{}}"#,
+        ].enumerated().map { Span(json: try json($1), index: $0) }
+        let lines = Span.ttsLines(spans)
+        let first = try #require(lines.first)
+        #expect(lines.count == 1)
+        #expect(first.text == "Ma")
+        #expect(abs(first.end.timeIntervalSince(first.start) - (0.25 + 9.15 + Span.ttsPlayoutSlack)) < 0.001)
+    }
+
+    @Test func picksTheAgentChannel() {
+        let file = URL(fileURLWithPath: "/tmp/x.ogg")
+        #expect(RecordingSource(kind: .observability, file: file, origin: nil).agentChannel(channels: 2, identical: false) == 1)
+        #expect(RecordingSource(kind: .egress, file: file, origin: nil).agentChannel(channels: 2, identical: false) == nil)
+        #expect(RecordingSource(kind: .egress, file: file, origin: nil, userLeftAgentRight: true).agentChannel(channels: 2, identical: false) == 1)
+        #expect(RecordingSource(kind: .egress, file: file, origin: nil).agentChannel(channels: 1, identical: true) == 0)
+    }
+}
