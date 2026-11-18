@@ -78,6 +78,11 @@ struct SessionDetailView: View {
                     .help("Copy a Markdown summary of this session (transcript, latency, warnings). It contains user speech; paste it only into your own tools.")
                     .disabled(detail.insights == nil)
             }
+            ToolbarItem {
+                Button { model.saveSessionData(detail.row) } label: { Label("Save Session Data", systemImage: "square.and.arrow.down") }
+                    .help("Save this session's transcript, logs, traces, metrics, recordings, and flags to a folder, and show it in Finder")
+                    .disabled(model.savingSessions.contains(detail.row.id))
+            }
         }
     }
 

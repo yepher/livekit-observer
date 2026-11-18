@@ -431,9 +431,7 @@ final class AppModel {
     private func egressSource(_ detail: SessionDetail) async -> RecordingSource? {
         guard let recording = detail.row.recording else { return nil }
         do {
-            let file = AppSettings.cacheDirectory.appendingPathComponent("recordings")
-                .appendingPathComponent(AppSettings.key(for: project), isDirectory: true)
-                .appendingPathComponent(recording.audioKey.replacingOccurrences(of: "/", with: "_"))
+            let file = egressFile(recording)
             if (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map({ Int64($0) }) != recording.size {
                 guard let client = try storageClient() else { throw StorageError.message("Egress storage is not set up for this project.") }
                 try await client.download(recording.audioKey, to: file)
@@ -446,10 +444,22 @@ final class AppModel {
         }
     }
 
+    /// Where an egress recording is cached once downloaded.
+    private func egressFile(_ recording: EgressRecording) -> URL {
+        AppSettings.cacheDirectory.appendingPathComponent("recordings")
+            .appendingPathComponent(AppSettings.key(for: project), isDirectory: true)
+            .appendingPathComponent(recording.audioKey.replacingOccurrences(of: "/", with: "_"))
+    }
+
+    /// Where LiveKit's session recording is cached once downloaded.
+    private static func observabilityFile(_ sessionId: String) -> URL {
+        AppSettings.cacheDirectory.appendingPathComponent("livekit").appendingPathComponent("\(sessionId).ogg")
+    }
+
     /// LiveKit's session recording, downloaded because its link expires and the spectrogram needs the file.
     private func observabilitySource(_ detail: SessionDetail) async -> RecordingSource? {
         guard detail.row.session != nil, let cli else { return nil }
-        let file = AppSettings.cacheDirectory.appendingPathComponent("livekit").appendingPathComponent("\(detail.row.id).ogg")
+        let file = Self.observabilityFile(detail.row.id)
         let marker = file.appendingPathExtension("json")
         // A settled recording never changes, so reuse it with its saved start time.
         if let saved = try? JSONValue.parse(Data(contentsOf: marker)), FileManager.default.fileExists(atPath: file.path) {
@@ -639,6 +649,107 @@ final class AppModel {
                                           flags: detail.flags, logs: detail.logs, spans: detail.spans)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    // MARK: Saving session data
+
+    /// Sessions whose data is being saved, so their Save commands are disabled until it finishes.
+    var savingSessions: Set<String> = []
+    /// Why the last save failed, or what it could not include; shown in an alert.
+    var saveMessage: String?
+
+    /// Asks where to save a session's data, writes it to a folder there, and shows the folder in Finder.
+    /// The folder holds the raw `lk analytics` JSON, the downloaded recordings, the flags, and, for the open
+    /// session, the same report Copy for Claude makes.
+    func saveSessionData(_ row: SessionRow) {
+        guard !savingSessions.contains(row.id) else { return }
+        let panel = NSSavePanel()
+        panel.title = "Save Session Data"
+        panel.message = "Saves a folder with the session's transcript, logs, traces, metrics, recordings, and flags."
+        panel.nameFieldStringValue = Self.folderName(for: row)
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        savingSessions.insert(row.id)
+        Task {
+            defer { savingSessions.remove(row.id) }
+            do {
+                let skipped = try await writeSessionData(row, to: folder)
+                UserDefaults.standard.set(folder.path, forKey: Self.savedFolderKey(row.id))
+                NSWorkspace.shared.activateFileViewerSelecting([folder])
+                if !skipped.isEmpty { saveMessage = "Saved, without:\n" + skipped.joined(separator: "\n") }
+            } catch {
+                saveMessage = "Could not save the session data: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Writes the session's files into `folder` and returns what it left out and why.
+    private func writeSessionData(_ row: SessionRow, to folder: URL) async throws -> [String] {
+        let files = FileManager.default
+        try files.createDirectory(at: folder, withIntermediateDirectories: true)
+        var skipped: [String] = []
+
+        if row.session != nil, let cli {
+            let raw = await cli.rawSessionData(row.id)
+            for file in raw.files { try file.data.write(to: folder.appendingPathComponent(file.name), options: .atomic) }
+            skipped += raw.failures.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }
+        } else if row.session == nil {
+            skipped.append("LiveKit data: LiveKit has no session for this recording (it keeps session data for 30 days).")
+        } else {
+            skipped.append("LiveKit data: \(liveKitError?.message ?? "lk is not available.")")
+        }
+
+        // Recordings are copied only once downloaded, which opening the session does.
+        let recordings: [(source: URL, name: String)] = [
+            (Self.observabilityFile(row.id), "livekit-recording.ogg"),
+        ] + (row.recording.map { recording in
+            let file = egressFile(recording)
+            return [(file, "egress-recording." + (file.pathExtension.isEmpty ? "audio" : file.pathExtension))]
+        } ?? [])
+        for recording in recordings {
+            guard files.fileExists(atPath: recording.source.path) else {
+                if row.session != nil || recording.name.hasPrefix("egress") { skipped.append("\(recording.name): not downloaded. Open the session first to download it, if there is one.") }
+                continue
+            }
+            let destination = folder.appendingPathComponent(recording.name)
+            try? files.removeItem(at: destination)
+            try files.copyItem(at: recording.source, to: destination)
+        }
+
+        let open = detail?.row.id == row.id ? detail : nil
+        let flags = open?.flags ?? SessionDetail.loadFlags(row.id)
+        if !flags.isEmpty {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(flags).write(to: folder.appendingPathComponent("flags.json"), options: .atomic)
+        }
+        if let open, let insights = open.insights {
+            let report = SessionReport.markdown(row: open.row, transcript: open.transcript, insights: insights,
+                                                origin: player.origin ?? open.row.startedAt, flags: open.flags, logs: open.logs, spans: open.spans)
+            try Data(report.utf8).write(to: folder.appendingPathComponent("report.md"), options: .atomic)
+        }
+        return skipped
+    }
+
+    private static func savedFolderKey(_ sessionId: String) -> String { "savedFolder." + sessionId }
+
+    /// Where the session's data was last saved, while that folder still exists.
+    func savedFolder(_ sessionId: String) -> URL? {
+        guard let path = UserDefaults.standard.string(forKey: Self.savedFolderKey(sessionId)) else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    func showSavedFolder(_ sessionId: String) {
+        if let folder = savedFolder(sessionId) { NSWorkspace.shared.activateFileViewerSelecting([folder]) }
+    }
+
+    /// "<room> <session id>", without characters Finder would not keep in a name.
+    private static func folderName(for row: SessionRow) -> String {
+        let name = [row.roomName, row.id].filter { !$0.isEmpty }.joined(separator: " ")
+        return name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
     }
 
     func clearCache() {

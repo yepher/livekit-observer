@@ -16,6 +16,11 @@ struct LiveKitObserverApp: App {
         }
         .commands {
             CheckForUpdatesCommand()
+            CommandGroup(replacing: .saveItem) {
+                Button("Save Session Data…") { if let row = model.detail?.row { model.saveSessionData(row) } }
+                    .keyboardShortcut("s")
+                    .disabled(model.detail.map { model.savingSessions.contains($0.row.id) } ?? true)
+            }
             CommandMenu("Playback") {
                 // Space is handled by AppModel.handleSpaceBar, so focused lists and buttons cannot swallow it
                 // and text fields still get it.
@@ -52,6 +57,11 @@ struct ContentView: View {
                 ContentUnavailableView("Choose a session", systemImage: "waveform", description: Text("Pick a session to hear the recording and read its transcript, logs, and traces."))
             }
         }
+        .alert("Save Session Data", isPresented: Binding(get: { model.saveMessage != nil }, set: { if !$0 { model.saveMessage = nil } })) {
+            Button("OK") { model.saveMessage = nil }
+        } message: {
+            Text(model.saveMessage ?? "")
+        }
         .toolbar {
             ToolbarItem(placement: .navigation) { ProjectMenu() }
             ToolbarItem {
@@ -85,6 +95,11 @@ struct SessionListView: View {
                                     Divider()
                                     Button("Open in LiveKit Dashboard") { model.openDashboard(row.id) }
                                         .disabled(row.session == nil || model.projectId == nil)
+                                    Button("Save Session Data…") { model.saveSessionData(row) }
+                                        .disabled(model.savingSessions.contains(row.id))
+                                    if model.savedFolder(row.id) != nil {
+                                        Button("Show Saved Data in Finder") { model.showSavedFolder(row.id) }
+                                    }
                                     Button("Copy Session ID") { AppModel.copy(row.id) }
                                     if let url = model.dashboardURL(for: row.id) { Button("Copy Dashboard Link") { AppModel.copy(url.absoluteString) } }
                                 }

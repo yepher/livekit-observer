@@ -149,7 +149,48 @@ struct LiveKitCLI: Sendable {
         json["dataStatus"]?["state"]?.string?.replacingOccurrences(of: "DATA_STATE_", with: "").lowercased()
     }
 
+    /// The session's data as `lk analytics` returns it, pretty-printed, by file name, for saving to disk.
+    /// Fetches each kind separately, so one that fails (with its error in `failures`) does not stop the rest.
+    func rawSessionData(_ id: String) async -> (files: [(name: String, data: Data)], failures: [String: String]) {
+        let requests: [(name: String, args: [String])] = [
+            ("session.json", ["session", "get", id]),
+            ("transcript.json", ["session", "transcript", id, "--limit", "5000"]),
+            ("logs.json", ["session", "logs", id, "--limit", "20000"]),
+            ("traces.json", ["session", "traces", id, "--limit", "20000"]),
+            ("metrics.json", ["session", "metrics", id, "--limit", "20000"]),
+        ]
+        var files: [(name: String, data: Data)] = [], failures: [String: String] = [:]
+        await withTaskGroup(of: (String, Result<Data, Error>).self) { group in
+            for request in requests {
+                group.addTask {
+                    do { return (request.name, .success(try await self.analyticsData(request.args))) }
+                    catch { return (request.name, .failure(error)) }
+                }
+            }
+            for await (name, result) in group {
+                switch result {
+                case .success(let data): files.append((name, Self.prettyPrinted(data)))
+                case .failure(let error): failures[name] = (error as? LiveKitCLIError)?.message ?? error.localizedDescription
+                }
+            }
+        }
+        return (files.sorted { $0.name < $1.name }, failures)
+    }
+
+    private static func prettyPrinted(_ data: Data) -> Data {
+        guard let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+              let pretty = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed])
+        else { return data }
+        return pretty
+    }
+
     private func analytics(_ args: [String]) async throws -> JSONValue {
+        let data = try await analyticsData(args)
+        do { return try JSONValue.parse(data) }
+        catch { throw LiveKitCLIError(kind: .failed, message: "lk returned output that is not JSON.") }
+    }
+
+    private func analyticsData(_ args: [String]) async throws -> Data {
         let selection = project.map { ["--project", $0] } ?? []
         let result = try await Self.execute(executable, selection + ["analytics"] + args + ["--json", "--user-auth"], in: Self.workingDirectory)
         let stderr = String(decoding: result.stderr, as: UTF8.self)
@@ -164,8 +205,7 @@ struct LiveKitCLI: Sendable {
             throw LiveKitCLIError(kind: .projectNotFound, message: "The signed-in LiveKit user cannot open project \(project.map { "“\($0)”" } ?? "(lk default)"). Sign in as a member of that project, or pick another.")
         }
         guard result.status == 0 else { throw LiveKitCLIError(kind: .failed, message: Self.message(result)) }
-        do { return try JSONValue.parse(result.stdout) }
-        catch { throw LiveKitCLIError(kind: .failed, message: "lk returned output that is not JSON.") }
+        return result.stdout
     }
 
     struct Output: Sendable { let status: Int32; let stdout: Data; let stderr: Data }
