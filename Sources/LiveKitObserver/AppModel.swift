@@ -75,7 +75,8 @@ struct RecordingSource: Identifiable, Hashable, Sendable {
 /// The detail of one session, loaded on selection.
 @MainActor @Observable
 final class SessionDetail {
-    let row: SessionRow
+    /// Updated in place when the session list refreshes, so a refresh doesn't reset what's open.
+    var row: SessionRow
     var transcript: [TranscriptItem] = []
     var logs: [LogRecord] = []
     var spans: [Span] = [] { didSet { findTTSStatic() } }
@@ -88,9 +89,9 @@ final class SessionDetail {
     var audioError: String?
     var loadingObservability = false
     var loadingAudio = false
-    var audioSource = ""
     var sources: [RecordingSource] = [] { didSet { findTTSStatic() } }
-    var activeSource: RecordingSource.Kind?
+    /// Each recording's channels as mono files, for playback and skimming.
+    var channelFiles: [RecordingSource.Kind: [URL]] = [:]
     var spectrograms: [RecordingSource.Kind: Spectrogram] = [:] { didSet { findTTSStatic() } }
     var spectrogramErrors: [RecordingSource.Kind: String] = [:]
     var analyzing: Set<RecordingSource.Kind> = []
@@ -100,6 +101,8 @@ final class SessionDetail {
     var alignment: Alignment = .reported
     /// Stretches marked while reviewing, highlighted in every view; saved per session.
     var flags: [Flag] = []
+    /// Spans expanded in the trace tree. Kept here so the tree can be rebuilt without collapsing.
+    var expandedSpans: Set<String> = []
     /// Possible static in the agent's TTS audio, per recording, on the session's clock.
     private(set) var ttsStatic: [RecordingSource.Kind: [TTSStatic]] = [:]
 
@@ -259,7 +262,14 @@ final class AppModel {
         projectId = override.isEmpty ? known?.projectId : override
         let (s, r) = await (sessions, recordings)
         rows = SessionRow.merge(sessions: s, recordings: r)
-        if let selection, let row = rows.first(where: { $0.id == selection }), detail?.row != row { openSelection() }
+        guard let selection, let row = rows.first(where: { $0.id == selection }), detail?.row != row else { return }
+        if let detail, detail.row.id == row.id, detail.row.recording == row.recording, (detail.row.session == nil) == (row.session == nil) {
+            // Same session with newer details, such as a live session that has ended: keep it open and reread its data.
+            detail.row = row
+            reloadObservability()
+        } else {
+            openSelection()
+        }
     }
 
     /// Looks up the agent name for a row the list is showing. Only sessions with observability data have logs to read.
@@ -442,7 +452,8 @@ final class AppModel {
         }
     }
 
-    /// Downloads the egress recording and LiveKit's session recording together, then plays the egress one if there is one.
+    /// Downloads the egress recording and LiveKit's session recording together, then loads every channel of both
+    /// into the player. When there are both, LiveKit's is muted to start with, since it holds the same audio.
     private func loadAudio(_ detail: SessionDetail) async {
         detail.loadingAudio = true
         defer { detail.loadingAudio = false }
@@ -451,11 +462,24 @@ final class AppModel {
         let found = await [egress, observability].compactMap { $0 }
         guard detail === self.detail, !Task.isCancelled else { return }
         detail.sources = found
-        guard let first = found.first else {
+        guard !found.isEmpty else {
             if detail.audioError == nil { detail.audioError = "No recording for this session." }
             return
         }
-        await play(first, in: detail)
+        var tracks: [PlaybackTrack] = []
+        for source in found {
+            let files = await Task.detached(priority: .userInitiated) { try? PlaybackFile.channels(source.file) }.value ?? []
+            guard detail === self.detail, !Task.isCancelled else { return }
+            detail.channelFiles[source.kind] = files
+            for (channel, file) in files.enumerated() {
+                // Each channel keeps its place in the recording: left, right, or the middle for a mix.
+                let pan: Float = files.count == 2 ? (channel == 0 ? -1 : 1) : 0
+                tracks.append(PlaybackTrack(id: TrackID(kind: source.kind, channel: channel), file: file, origin: detail.origin(of: source), pan: pan))
+            }
+        }
+        if tracks.isEmpty, detail.audioError == nil { detail.audioError = "Could not decode the recordings." }
+        let duplicate = found.count > 1 ? Set(tracks.map(\.id).filter { $0.kind == .observability }) : []
+        player.load(tracks, muted: duplicate)
     }
 
     private func egressSource(_ detail: SessionDetail) async -> RecordingSource? {
@@ -509,26 +533,6 @@ final class AppModel {
             return RecordingSource(kind: .observability, file: file, origin: recording.startedAt)
         } catch {
             return nil
-        }
-    }
-
-    private func play(_ source: RecordingSource, in detail: SessionDetail) async {
-        detail.activeSource = source.kind
-        detail.audioSource = source.detail
-        let file = await Task.detached(priority: .userInitiated) { await PlaybackFile.timed(source.file) }.value
-        guard detail.activeSource == source.kind else { return }
-        await player.load(file, origin: detail.origin(of: source), title: detail.row.roomName)
-    }
-
-    /// Switches recordings at the same moment of the session, keeping playback going.
-    func selectSource(_ kind: RecordingSource.Kind) {
-        guard let detail, detail.activeSource != kind, let source = detail.sources.first(where: { $0.kind == kind }) else { return }
-        let moment = player.currentDate
-        let wasPlaying = player.isPlaying
-        Task {
-            await play(source, in: detail)
-            if let t = player.offset(for: moment) { player.seek(to: t) }
-            if wasPlaying { player.play() }
         }
     }
 
@@ -602,9 +606,8 @@ final class AppModel {
     private func setCorrection(_ value: TimeInterval?, how: SessionDetail.Alignment, in detail: SessionDetail) {
         detail.originCorrection[.egress] = value
         detail.alignment = how
-        if detail.activeSource == .egress, detail === self.detail,
-           let egress = detail.sources.first(where: { $0.kind == .egress }) {
-            player.setOrigin(detail.origin(of: egress))
+        if detail === self.detail, let egress = detail.sources.first(where: { $0.kind == .egress }) {
+            player.setOrigin(detail.origin(of: egress), of: .egress)
         }
     }
 

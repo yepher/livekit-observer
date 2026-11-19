@@ -290,20 +290,44 @@ private func json(_ text: String) throws -> JSONValue { try JSONValue.parse(Data
 }
 
 @Suite struct PlaybackFileTests {
-    /// LiveKit's recording of RM_YKzvGTR8nqoi, if it is cached on this Mac: AVPlayer called it 381.8 s, decoding gives 494.2 s.
-    @Test func copiesARecordingAVPlayerMistimes() async throws {
-        let original = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/LiveKitObserver/livekit/RM_YKzvGTR8nqoi.ogg")
-        guard FileManager.default.fileExists(atPath: original.path) else { return }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".ogg")
-        try FileManager.default.copyItem(at: original, to: url)
-        defer { try? FileManager.default.removeItem(at: url); try? FileManager.default.removeItem(at: url.appendingPathExtension("playback.caf")) }
-        #expect(await PlaybackFile.needsCopy(url))
-        let played = await PlaybackFile.timed(url)
-        #expect(played.pathExtension == "caf")
-        let decoded = try AVAudioFile(forReading: url), copy = try AVAudioFile(forReading: played)
-        #expect(abs(Int64(decoded.length) - Int64(copy.length)) < 4800)
-        let seconds = try await AVURLAsset(url: played).load(.duration).seconds
-        #expect(abs(seconds - Double(decoded.length) / decoded.processingFormat.sampleRate) < 0.1)
+    /// Writes a stereo file whose right channel is `right(i)` and left is a sine.
+    private func stereo(right: (Int) -> Float) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".caf")
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 96_000))
+        buffer.frameLength = 96_000
+        let data = try #require(buffer.floatChannelData)
+        for i in 0..<96_000 {
+            data[0][i] = 0.5 * sin(Float(i) * 0.05)
+            data[1][i] = right(i)
+        }
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        try file.write(from: buffer)
+        return url
+    }
+
+    private func cleanUp(_ url: URL) {
+        for path in [url, PlaybackFile.file(url, channel: 0), PlaybackFile.file(url, channel: 1)] { try? FileManager.default.removeItem(at: path) }
+    }
+
+    @Test func splitsEachChannelIntoItsOwnFile() throws {
+        let url = try stereo { 0.5 * sin(Float($0) * 0.013) }
+        defer { cleanUp(url) }
+        let files = try PlaybackFile.channels(url)
+        #expect(files.count == 2)
+        for file in files {
+            let audio = try AVAudioFile(forReading: file)
+            #expect(audio.processingFormat.channelCount == 1)
+            #expect(abs(audio.length - 96_000) < 4_800)
+        }
+        #expect(try PlaybackFile.channels(url) == files)  // cached
+    }
+
+    @Test func keepsOneFileForAMix() throws {
+        let url = try stereo { 0.5 * sin(Float($0) * 0.05) }
+        defer { cleanUp(url) }
+        #expect(try PlaybackFile.channels(url).count == 1)
+        #expect(try PlaybackFile.channels(url).count == 1)  // cached
     }
 }
 

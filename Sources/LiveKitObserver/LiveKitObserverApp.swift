@@ -29,7 +29,7 @@ struct LiveKitObserverApp: App {
                 Button("Back 10 Seconds") { model.player.skip(-10) }.keyboardShortcut(.leftArrow, modifiers: .command)
                 Button("Forward 10 Seconds") { model.player.skip(10) }.keyboardShortcut(.rightArrow, modifiers: .command)
                 Divider()
-                Toggle("Skimming", isOn: Bindable(model.skimmer).isEnabled).keyboardShortcut("s", modifiers: .option)
+                Toggle("Scrub", isOn: Bindable(model.skimmer).isEnabled).keyboardShortcut("s", modifiers: .option)
                 Divider()
                 Button("Flag Playhead") { model.flagPlayhead() }.keyboardShortcut("m", modifiers: .option)
                     .disabled(model.detail == nil || model.player.currentDate == nil)

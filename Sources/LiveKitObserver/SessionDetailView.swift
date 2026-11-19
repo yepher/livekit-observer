@@ -123,23 +123,15 @@ struct PlayerBar: View {
                 Button { player.toggle() } label: { Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill").font(.title) }
                     .buttonStyle(.borderless)
                 Button { player.skip(10) } label: { Image(systemName: "goforward.10") }.buttonStyle(.borderless)
-                Text(Format.duration(player.currentTime)).font(.caption.monospacedDigit()).fixedSize()
-                Slider(value: Binding(get: { player.currentTime }, set: { player.seek(to: $0) }), in: 0...max(player.duration, 1))
-                    .frame(minWidth: 60)
-                Text(Format.duration(player.duration)).font(.caption.monospacedDigit()).fixedSize()
+                Text("\(Format.duration(player.currentTime)) / \(Format.duration(player.duration))").font(.caption.monospacedDigit()).fixedSize()
                 Picker("Speed", selection: Binding(get: { player.rate }, set: { player.rate = $0 })) {
                     ForEach([0.75, 1, 1.25, 1.5, 2] as [Float], id: \.self) { Text("\($0.formatted())×").tag($0) }
                 }
                 .labelsHidden().frame(width: 70)
-                if detail.sources.count > 1 {
-                    Picker("Recording", selection: Binding(get: { detail.activeSource ?? .egress }, set: { model.selectSource($0) })) {
-                        ForEach(detail.sources) { Text($0.title).tag($0.kind) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize()
-                    .help("Switch recordings at the same moment of the session")
-                } else {
-                    Text(detail.audioSource).font(.caption2).foregroundStyle(.secondary)
-                }
+                Toggle(isOn: Bindable(model.skimmer).isEnabled) { Label("Scrub", systemImage: "waveform.badge.magnifyingglass") }
+                    .toggleStyle(.button)
+                    .help("Hear the audio under the pointer as it moves over the spectrogram (⌥S)")
+                Spacer()
                 if let error = detail.audioError {
                     Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange).help(error)
                 }
@@ -423,6 +415,7 @@ struct LogsView: View {
                         SelectionHint(text: selected.isEmpty ? "Select a line to see its attributes." : "\(selected.count) lines selected.")
                     }
                 }
+                .sizedBySplitView()
                 .frame(minWidth: 220, idealWidth: 300, maxWidth: 480, maxHeight: .infinity)
             }
         }
@@ -454,6 +447,16 @@ struct AttributesView: View {
                     }
                 }
             }
+        }
+    }
+}
+
+extension View {
+    /// Fills whatever width its split view pane has, without its content asking for more. Otherwise selecting a
+    /// line with long attributes widened the pane, and the list beside it lost its scroll position.
+    func sizedBySplitView() -> some View {
+        GeometryReader { geo in
+            self.frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
         }
     }
 }
@@ -502,6 +505,7 @@ struct TracesView: View {
                     SelectionHint(text: "Select a span to see its attributes.")
                 }
             }
+            .sizedBySplitView()
             .frame(minWidth: 220, idealWidth: 320, maxWidth: 480, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -509,7 +513,8 @@ struct TracesView: View {
     }
 }
 
-/// The span tree. Equal when its spans and flags are, so a new selection does not rebuild it.
+/// The span tree. Equal when its spans and flags are, so a new selection does not rebuild it. Expansion is kept
+/// in the session rather than in the list, so a rebuild (when the session's data is reread) doesn't collapse it.
 private struct SpanTree: View, Equatable {
     let detail: SessionDetail
     let spans: [Span]
@@ -522,30 +527,71 @@ private struct SpanTree: View, Equatable {
         let roots = SpanNode.tree(spans)
         let start = spans.compactMap(\.start).min()
         let end = spans.compactMap(\.end).max()
-        let total = max((end ?? .now).timeIntervalSince(start ?? .now), 0.001)
-        let marked = detail.flaggedSpans()
-        List(roots, children: \.children, selection: $selected) { node in
-            let flag = marked.flagged.contains(node.id) ? detail.flag(for: node.span) : nil
-            HStack {
-                Image(systemName: node.span.failed ? "xmark.octagon.fill" : "circle.fill").font(.system(size: 6)).foregroundStyle(node.span.failed ? .red : .secondary)
-                Text(node.span.name).lineLimit(1)
-                if flag != nil {
-                    FlagIcon(flag: flag)
-                } else if marked.ancestors.contains(node.id) {
-                    Image(systemName: "flag").font(.caption2).foregroundStyle(Flag.color).help("Contains flagged spans")
-                }
-                Spacer()
-                TimelineBar(start: node.span.start, duration: node.span.duration, origin: start, total: total).frame(minWidth: 60, maxWidth: 180).frame(height: 8)
-                Text(node.span.duration.map { $0 < 1 ? "\(Int($0 * 1000)) ms" : String(format: "%.2f s", $0) } ?? "–")
-                    .font(.caption.monospacedDigit()).foregroundStyle((node.span.duration ?? 0) >= 2 ? .orange : .secondary).frame(width: 64, alignment: .trailing)
+        let context = SpanRowContext(
+            detail: detail, marked: detail.flaggedSpans(), origin: start,
+            total: max((end ?? .now).timeIntervalSince(start ?? .now), 0.001)
+        )
+        List(selection: $selected) {
+            ForEach(roots) { SpanBranch(node: $0, context: context) }
+        }
+    }
+}
+
+/// What every row in the tree shares.
+private struct SpanRowContext {
+    let detail: SessionDetail
+    let marked: (flagged: Set<Span.ID>, ancestors: Set<Span.ID>)
+    let origin: Date?
+    let total: TimeInterval
+}
+
+/// A span and, when expanded, its children.
+private struct SpanBranch: View {
+    let node: SpanNode
+    let context: SpanRowContext
+
+    var body: some View {
+        if let children = node.children {
+            DisclosureGroup(isExpanded: expanded) {
+                ForEach(children) { SpanBranch(node: $0, context: context) }
+            } label: {
+                row
             }
             .tag(node.id)
-            .listRowBackground(flag != nil ? Flag.color.opacity(0.22) : nil)
-            .contextMenu {
-                if let spanStart = node.span.start {
-                    FlagMenuItems(detail: detail, existing: flag, title: "Flag This Span") {
-                        detail.addFlag(from: spanStart, to: node.span.end ?? spanStart, note: node.span.name)
-                    }
+        } else {
+            row.tag(node.id)
+        }
+    }
+
+    private var expanded: Binding<Bool> {
+        let detail = context.detail, id = node.id
+        return Binding(
+            get: { detail.expandedSpans.contains(id) },
+            set: { if $0 { detail.expandedSpans.insert(id) } else { detail.expandedSpans.remove(id) } }
+        )
+    }
+
+    private var row: some View {
+        let detail = context.detail
+        let flag = context.marked.flagged.contains(node.id) ? detail.flag(for: node.span) : nil
+        return HStack {
+            Image(systemName: node.span.failed ? "xmark.octagon.fill" : "circle.fill").font(.system(size: 6)).foregroundStyle(node.span.failed ? .red : .secondary)
+            Text(node.span.name).lineLimit(1)
+            if flag != nil {
+                FlagIcon(flag: flag)
+            } else if context.marked.ancestors.contains(node.id) {
+                Image(systemName: "flag").font(.caption2).foregroundStyle(Flag.color).help("Contains flagged spans")
+            }
+            Spacer()
+            TimelineBar(start: node.span.start, duration: node.span.duration, origin: context.origin, total: context.total).frame(minWidth: 60, maxWidth: 180).frame(height: 8)
+            Text(node.span.duration.map { $0 < 1 ? "\(Int($0 * 1000)) ms" : String(format: "%.2f s", $0) } ?? "–")
+                .font(.caption.monospacedDigit()).foregroundStyle((node.span.duration ?? 0) >= 2 ? .orange : .secondary).frame(width: 64, alignment: .trailing)
+        }
+        .listRowBackground(flag != nil ? Flag.color.opacity(0.22) : nil)
+        .contextMenu {
+            if let spanStart = node.span.start {
+                FlagMenuItems(detail: detail, existing: flag, title: "Flag This Span") {
+                    detail.addFlag(from: spanStart, to: node.span.end ?? spanStart, note: node.span.name)
                 }
             }
         }

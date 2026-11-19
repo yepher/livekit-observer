@@ -6,8 +6,7 @@ struct SpectrogramView: View {
     let detail: SessionDetail
     let origin: Date?
     @Environment(AppModel.self) private var model
-    @AppStorage("spectrogramLayout") private var layout = Layout.stacked
-    /// Seconds on screen; 0 is the whole session. Set by the presets or by pinching.
+    /// Seconds on screen; 0 is the whole session. Set by pinching.
     @AppStorage("spectrogramSpan") private var span: Double = 30
     /// The pinch in progress; the image is stretched live and rebuilt when the pinch ends.
     @GestureState private var pinch = Pinch()
@@ -18,26 +17,13 @@ struct SpectrogramView: View {
     @State private var lanesWidth: CGFloat = 0
     @State private var scrollMonitor: Any?
     static let shortestSpan: TimeInterval = 2
-    /// Space between recordings side by side.
+    /// Space between recordings.
     private static let gap: CGFloat = 12
 
     /// How far the fingers have spread, and where they are across a lane (0 is the left edge, 1 the right).
     private struct Pinch {
         var scale: CGFloat = 1
         var anchor: CGFloat = 0.5
-    }
-
-    enum Layout: String, CaseIterable, Identifiable {
-        case stacked = "Stacked", sideBySide = "Side by side"
-        var id: String { rawValue }
-    }
-
-    /// Seconds on screen; 0 is the whole session.
-    enum Zoom: Int, CaseIterable, Identifiable {
-        case ten = 10, thirty = 30, twoMinutes = 120, whole = 0
-        var id: Int { rawValue }
-        var seconds: TimeInterval { TimeInterval(rawValue) }
-        var label: String { self == .whole ? "Whole session" : self == .twoMinutes ? "2 min" : "\(rawValue) s" }
     }
 
     var body: some View {
@@ -54,7 +40,7 @@ struct SpectrogramView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 Group {
-                    if layout == .stacked { VStack(spacing: Self.gap) { groups } } else { HStack(alignment: .top, spacing: Self.gap) { groups } }
+                    VStack(spacing: Self.gap) { groups }
                 }
                 .onHover { hovering = $0 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { lanesWidth = $0 }
@@ -111,46 +97,19 @@ struct SpectrogramView: View {
         return true
     }
 
-    /// The pickers and the scale legend share a row when they fit; otherwise the legend gets its own line.
+    /// The scale legend and how much time is on screen.
     private var controls: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack { pickers; Spacer(minLength: 12); legend }
-            VStack(alignment: .leading, spacing: 6) {
-                ViewThatFits(in: .horizontal) {
-                    HStack { pickers; Spacer(minLength: 0) }
-                    VStack(alignment: .leading, spacing: 6) { layoutPicker; HStack { zoomPicker; Spacer(minLength: 0) } }
-                }
-                legend.lineLimit(2)
-            }
-        }
-    }
-
-    @ViewBuilder private var pickers: some View { layoutPicker; zoomPicker }
-
-    private var layoutPicker: some View {
-        Picker("Layout", selection: $layout) { ForEach(Layout.allCases) { Text($0.rawValue).tag($0) } }
-            .pickerStyle(.segmented).labelsHidden().fixedSize()
-    }
-
-    private var zoomPicker: some View {
-        HStack {
-            Picker("Zoom", selection: preset) { ForEach(Zoom.allCases) { Text($0.label).tag(Optional($0)) } }
-                .pickerStyle(.segmented).labelsHidden().fixedSize()
-                .help("Pinch on the spectrogram to zoom in or out")
-            if preset.wrappedValue == nil {
-                Text(Format.duration(span)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
-            }
+        HStack(alignment: .firstTextBaseline) {
+            legend
+            Text(window == wholeWindow ? "Whole session" : Format.duration(window.upperBound.timeIntervalSince(window.lowerBound)) + " shown")
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
         }
     }
 
     private var legend: some View {
-        Text("Mel scale \(Int(Spectrogram.minHz)) Hz–\(Int(Spectrogram.maxHz / 1000)) kHz · \(Int(Spectrogram.floorDB)) to \(Int(Spectrogram.ceilingDB)) dBFS · hover to skim (⌥S toggles) · click to move the playhead · drag or swipe to scroll · right-click to flag")
-            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-    }
-
-    /// The preset matching the current span, or nil after a pinch to an in-between zoom.
-    private var preset: Binding<Zoom?> {
-        Binding(get: { Zoom.allCases.first { $0.seconds == span } }, set: { if let zoom = $0 { span = zoom.seconds; scrollStart = nil } })
+        Text("Mel scale \(Int(Spectrogram.minHz)) Hz–\(Int(Spectrogram.maxHz / 1000)) kHz · \(Int(Spectrogram.floorDB)) to \(Int(Spectrogram.ceilingDB)) dBFS · pinch to zoom · drag or swipe to scroll · hover to scrub · click to move the playhead · right-click to flag · M mutes a track, S solos it")
+            .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            .frame(maxWidth: .infinity, alignment: .leading).layoutPriority(1)
     }
 
     /// The span after a pinch: spreading the fingers shows less time. Zooming out past the session shows all of it.
@@ -161,18 +120,13 @@ struct SpectrogramView: View {
         return next >= length * 0.98 ? 0 : max(Self.shortestSpan, next.rounded())
     }
 
-    /// One lane's width: all of it stacked; side by side, each recording gets a share.
-    private var laneWidth: CGFloat {
-        let count = CGFloat(max(detail.sources.count, 1))
-        return layout == .stacked ? lanesWidth : (lanesWidth - Self.gap * (count - 1)) / count
-    }
+    /// Lanes are stacked, each the full width.
+    private var laneWidth: CGFloat { lanesWidth }
 
-    /// How far across its lane a point `x` from the lanes' left edge is, from 0 to 1.
+    /// How far across the lanes a point `x` from their left edge is, from 0 to 1.
     private func laneFraction(at x: CGFloat) -> CGFloat {
-        let lane = laneWidth
-        guard lane > 0 else { return 0.5 }
-        let within = layout == .stacked ? x : x.truncatingRemainder(dividingBy: lane + Self.gap)
-        return min(max(within / lane, 0), 1)
+        guard lanesWidth > 0 else { return 0.5 }
+        return min(max(x / lanesWidth, 0), 1)
     }
 
     /// Every recording, start to end, on the session's wall clock.
@@ -180,7 +134,7 @@ struct SpectrogramView: View {
         let fallback = origin ?? Date(timeIntervalSinceReferenceDate: 0)
         let spans = detail.sources.map { source -> ClosedRange<Date> in
             let start = detail.origin(of: source) ?? fallback
-            let length = detail.spectrograms[source.kind]?.duration ?? (detail.activeSource == source.kind ? model.player.duration : 0)
+            let length = detail.spectrograms[source.kind]?.duration ?? 0
             return start...start.addingTimeInterval(max(length, 1))
         }
         return (spans.map(\.lowerBound).min() ?? fallback)...(spans.map(\.upperBound).max() ?? fallback.addingTimeInterval(1))
@@ -209,6 +163,31 @@ struct SpectrogramView: View {
     }
 }
 
+/// Mute and solo for one lane's track, as in a mixing desk. Soloing any track silences the ones not soloed.
+private struct TrackButtons: View {
+    let track: TrackID
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let player = model.player
+        HStack(spacing: 2) {
+            button("M", on: player.muted.contains(track), color: .orange, help: "Mute this track") { player.toggleMute(track) }
+            button("S", on: player.soloed.contains(track), color: .yellow, help: "Solo this track: hear only soloed tracks") { player.toggleSolo(track) }
+        }
+    }
+
+    private func button(_ title: String, on: Bool, color: Color, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.caption2.weight(.bold).monospaced())
+                .foregroundStyle(on ? .black : .white)
+                .frame(width: 18, height: 16)
+                .background(on ? color : .black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
 /// One recording: a title, a lane per channel, and a time axis.
 private struct SourceLanes: View {
     let detail: SessionDetail
@@ -225,7 +204,6 @@ private struct SourceLanes: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(source.title).font(.headline).fixedSize()
-                if detail.activeSource == source.kind { Tag(text: "Playing", symbol: "speaker.wave.2", color: .accentColor).fixedSize() }
                 Text(source.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                     .layoutPriority(-1).help(source.detail)
                 Spacer(minLength: 8)
@@ -237,7 +215,8 @@ private struct SourceLanes: View {
             }
             if let spectrogram = detail.spectrograms[source.kind] {
                 ForEach(0..<spectrogram.channels.count, id: \.self) { channel in
-                    Lane(detail: detail, spectrogram: spectrogram, channel: channel, file: source.file, start: start, window: window, pinch: pinch, anchor: anchor, canScroll: canScroll, scrollStart: $scrollStart, label: source.channelName(channel, of: spectrogram.channels.count, identical: spectrogram.identicalChannels),
+                    Lane(detail: detail, spectrogram: spectrogram, channel: channel, track: TrackID(kind: source.kind, channel: channel),
+                         file: detail.channelFiles[source.kind].flatMap { $0.indices.contains(channel) ? $0[channel] : nil } ?? source.file, start: start, window: window, pinch: pinch, anchor: anchor, canScroll: canScroll, scrollStart: $scrollStart, label: source.channelName(channel, of: spectrogram.channels.count, identical: spectrogram.identicalChannels),
                          ttsStatic: channel == source.agentChannel(channels: spectrogram.channels.count, identical: spectrogram.identicalChannels) ? detail.ttsStatic[source.kind] ?? [] : [])
                         .frame(minHeight: 60, maxHeight: .infinity)
                 }
@@ -292,7 +271,9 @@ private struct Lane: View {
     let detail: SessionDetail
     let spectrogram: Spectrogram
     let channel: Int
-    /// The recording, for skimming.
+    /// The player's track for this channel, for mute and solo.
+    let track: TrackID
+    /// The channel's audio (or the whole recording until it is split), for skimming.
     let file: URL
     /// The wall-clock time of the recording's first sample.
     let start: Date
@@ -326,13 +307,17 @@ private struct Lane: View {
                 if let image {
                     Image(decorative: image, scale: 1).resizable().interpolation(.medium)
                         .scaleEffect(x: pinch, y: 1, anchor: UnitPoint(x: anchor, y: 0.5))
+                        .opacity(model.player.isLoaded && !model.player.isAudible(track) ? 0.45 : 1)
                 }
                 FlagBands(flags: detail.flags, window: window, width: geo.size.width)
                 StaticBoxes(items: ttsStatic, window: window, width: geo.size.width)
                 frequencyLabels(size: geo.size)
-                Text(label).font(.caption.weight(.semibold)).foregroundStyle(.white)
-                    .padding(.horizontal, 5).padding(.vertical, 2).background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
-                    .padding(4)
+                HStack(spacing: 4) {
+                    Text(label).font(.caption.weight(.semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 5).padding(.vertical, 2).background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
+                    if model.player.isLoaded { TrackButtons(track: track) }
+                }
+                .padding(4)
                 Playhead(window: window, width: geo.size.width)
                 Skimline(window: window, width: geo.size.width)
             }
