@@ -10,7 +10,7 @@ struct SpectrogramView: View {
     /// Seconds on screen; 0 is the whole session. Set by the presets or by pinching.
     @AppStorage("spectrogramSpan") private var span: Double = 30
     /// The pinch in progress; the image is stretched live and rebuilt when the pinch ends.
-    @GestureState private var pinch: CGFloat = 1
+    @GestureState private var pinch = Pinch()
     /// The left edge of the zoomed view once it has been placed; nil puts the playhead a quarter of the way in.
     @State private var scrollStart: Date?
     /// Whether the pointer is over the lanes, so horizontal scrolling there moves the view.
@@ -18,6 +18,14 @@ struct SpectrogramView: View {
     @State private var lanesWidth: CGFloat = 0
     @State private var scrollMonitor: Any?
     static let shortestSpan: TimeInterval = 2
+    /// Space between recordings side by side.
+    private static let gap: CGFloat = 12
+
+    /// How far the fingers have spread, and where they are across a lane (0 is the left edge, 1 the right).
+    private struct Pinch {
+        var scale: CGFloat = 1
+        var anchor: CGFloat = 0.5
+    }
 
     enum Layout: String, CaseIterable, Identifiable {
         case stacked = "Stacked", sideBySide = "Side by side"
@@ -42,20 +50,22 @@ struct SpectrogramView: View {
             } else {
                 let window = window
                 let groups = ForEach(detail.sources) { source in
-                    SourceLanes(detail: detail, source: source, window: window, origin: origin, pinch: pinch, anchor: anchor(in: window), canScroll: window != wholeWindow, scrollStart: $scrollStart)
+                    SourceLanes(detail: detail, source: source, window: window, origin: origin, pinch: pinch.scale, anchor: pinch.anchor, canScroll: window != wholeWindow, scrollStart: $scrollStart)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 Group {
-                    if layout == .stacked { VStack(spacing: 12) { groups } } else { HStack(alignment: .top, spacing: 12) { groups } }
+                    if layout == .stacked { VStack(spacing: Self.gap) { groups } } else { HStack(alignment: .top, spacing: Self.gap) { groups } }
                 }
                 .onHover { hovering = $0 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { lanesWidth = $0 }
                 .simultaneousGesture(
                     MagnifyGesture()
-                        .updating($pinch) { value, state, _ in state = value.magnification }
+                        .updating($pinch) { value, state, _ in
+                            state = Pinch(scale: value.magnification, anchor: laneFraction(at: value.startAnchor.x * lanesWidth))
+                        }
                         .onEnded { value in
-                            // Keep the moment under the pinch's anchor where it was.
-                            let old = window, fraction = anchor(in: old)
+                            // Keep the moment under the fingers where it was.
+                            let old = window, fraction = laneFraction(at: value.startAnchor.x * lanesWidth)
                             let pivot = old.lowerBound.addingTimeInterval(old.upperBound.timeIntervalSince(old.lowerBound) * fraction)
                             span = zoomed(by: value.magnification)
                             scrollStart = span > 0 ? pivot.addingTimeInterval(-span * fraction) : nil
@@ -92,9 +102,6 @@ struct SpectrogramView: View {
         guard hovering, dx != 0, abs(dx) > abs(event.scrollingDeltaY) else { return false }
         let view = window
         guard view != wholeWindow, lanesWidth > 0 else { return false }
-        // Side by side, each recording gets a share of the width.
-        let count = CGFloat(max(detail.sources.count, 1))
-        let laneWidth = layout == .stacked ? lanesWidth : (lanesWidth - 12 * (count - 1)) / count
         let secondsPerPoint = view.upperBound.timeIntervalSince(view.lowerBound) / max(laneWidth, 1)
         // A trackpad reports points; a mouse wheel reports lines.
         let points = event.hasPreciseScrollingDeltas ? dx : dx * 10
@@ -154,11 +161,18 @@ struct SpectrogramView: View {
         return next >= length * 0.98 ? 0 : max(Self.shortestSpan, next.rounded())
     }
 
-    /// Where the pinch is centered: the playhead when it is on screen, otherwise the middle.
-    private func anchor(in window: ClosedRange<Date>) -> CGFloat {
-        let length = window.upperBound.timeIntervalSince(window.lowerBound)
-        guard let now = model.player.currentDate, window.contains(now), length > 0 else { return 0.5 }
-        return now.timeIntervalSince(window.lowerBound) / length
+    /// One lane's width: all of it stacked; side by side, each recording gets a share.
+    private var laneWidth: CGFloat {
+        let count = CGFloat(max(detail.sources.count, 1))
+        return layout == .stacked ? lanesWidth : (lanesWidth - Self.gap * (count - 1)) / count
+    }
+
+    /// How far across its lane a point `x` from the lanes' left edge is, from 0 to 1.
+    private func laneFraction(at x: CGFloat) -> CGFloat {
+        let lane = laneWidth
+        guard lane > 0 else { return 0.5 }
+        let within = layout == .stacked ? x : x.truncatingRemainder(dividingBy: lane + Self.gap)
+        return min(max(within / lane, 0), 1)
     }
 
     /// Every recording, start to end, on the session's wall clock.
