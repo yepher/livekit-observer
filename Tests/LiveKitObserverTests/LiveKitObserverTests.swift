@@ -331,6 +331,31 @@ private func json(_ text: String) throws -> JSONValue { try JSONValue.parse(Data
     }
 }
 
+@Suite struct PricingCatalogTests {
+    /// A docs server reply, as server-sent events, cut down to three models.
+    private let reply = #"""
+    event: message
+    data: {"result":{"content":[{"type":"text","text":"{\"inference\":{\"stt\":[{\"model_id\":\"deepgram/nova-3\",\"rates\":[{\"metric\":\"minute_usage\",\"build\":\"0.0048\",\"ship\":\"0.0048\",\"scale\":\"0.0042\"}]}],\"llm\":[{\"model_id\":\"openai/gpt-4.1-mini\",\"rates\":[{\"metric\":\"cached_input_tokens\",\"ship\":\"0.10\",\"scale\":\"0.10\"},{\"metric\":\"input_tokens\",\"ship\":\"0.40\",\"scale\":\"0.40\"},{\"metric\":\"output_tokens\",\"ship\":\"1.60\",\"scale\":\"1.60\"}]}],\"tts\":[{\"model_id\":\"cartesia/sonic-3\",\"rates\":[{\"metric\":\"character_usage\",\"build\":\"50\",\"ship\":\"50\",\"scale\":\"37.50\"}]}]}}"}]},"jsonrpc":"2.0","id":1}
+
+    """#
+
+    @Test func readsModelPricesPerPlan() throws {
+        let list = try PricingCatalog.priceList(fromResponse: Data(reply.utf8))
+        let catalog = try #require(PricingCatalog(json: try JSONValue.parse(list), fetched: .now))
+        let ship = PricePlan.ship.with(catalog), scale = PricePlan.scale.with(catalog)
+        #expect(ship.rate(model: "cartesia/sonic-3.5", unit: .characters) == 50)
+        #expect(scale.rate(model: "cartesia/sonic-3", unit: .characters) == 37.5)
+        #expect(abs((scale.rate(model: "deepgram/nova-3", unit: .audioHour) ?? 0) - 0.252) < 1e-9)
+        #expect(ship.rate(model: "openai/gpt-4.1-mini", unit: .inputTokens) == 0.4)
+        #expect(ship.rate(model: "openai/gpt-4.1-mini", unit: .outputTokens) == 1.6)
+    }
+
+    @Test func keepsBuiltInRatesWithoutAList() {
+        #expect(PricePlan.scale.with(nil).rate(model: "cartesia/sonic-3", unit: .characters) == 37.5)
+        #expect(PricePlan.ship.with(nil).rate(model: "cartesia/sonic-3", unit: .characters) == nil)
+    }
+}
+
 @Suite struct CostTests {
     private func parse(_ text: String) throws -> JSONValue { JSONValue(any: try JSONSerialization.jsonObject(with: Data(text.utf8))) }
 

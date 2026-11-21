@@ -249,7 +249,28 @@ final class AppModel {
         signedInUser = await cli.signedInUser()
     }
 
+    /// LiveKit's model prices, for the cost breakdown; nil until read from the cache or the docs server.
+    var pricing: PricingCatalog?
+
+    private static var pricingFile: URL { AppSettings.cacheDirectory.appendingPathComponent("pricing.json") }
+
+    /// Reads the cached price list, then fetches a new one if it is more than a day old. Failures keep what we have.
+    func loadPricing() async {
+        let file = Self.pricingFile
+        if pricing == nil, let data = try? Data(contentsOf: file), let json = try? JSONValue.parse(data) {
+            let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            pricing = PricingCatalog(json: json, fetched: modified)
+        }
+        guard Date().timeIntervalSince(pricing?.fetched ?? .distantPast) > PricingCatalog.maximumAge else { return }
+        guard let data = try? await PricingCatalog.download(), let json = try? JSONValue.parse(data),
+              let catalog = PricingCatalog(json: json, fetched: Date()) else { return }
+        pricing = catalog
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: file)
+    }
+
     func refresh() async {
+        Task { await loadPricing() }
         settings = AppSettings()
         loading = true
         defer { loading = false }

@@ -665,9 +665,10 @@ struct CostBox: View {
     let detail: SessionDetail
     @AppStorage("pricePlan") private var planId = PricePlan.scale.id
     @AppStorage("noiseCancellation") private var noiseCancellation = false
+    @Environment(AppModel.self) private var model
 
     var body: some View {
-        let plan = PricePlan.named(planId)
+        let plan = PricePlan.named(planId).with(model.pricing)
         let lines = SessionCost.lines(plan: plan, room: detail.room, spans: detail.spans, metrics: detail.metrics, logs: detail.logs,
                                       transcriptItems: detail.transcript.count, noiseCancellation: noiseCancellation)
         let total = lines.compactMap(\.cost).reduce(0, +)
@@ -701,7 +702,7 @@ struct CostBox: View {
                         Text(Format.dollars(total)).font(.headline.monospacedDigit())
                     }
                 }
-                Text("At \(plan.name) overage rates, so this is what the session costs once the month's included usage runs out; before that it is covered by the plan. \(plan.note) Lines marked “billed by” use your own provider keys and are not LiveKit charges.")
+                Text("At \(plan.name) overage rates, so this is what the session costs once the month's included usage runs out; before that it is covered by the plan. \(plan.note) Lines marked “billed by” use your own provider keys and are not LiveKit charges. \(model.pricing.map { "Model prices are from LiveKit's price list, \($0.fetched.formatted(.relative(presentation: .named)))." } ?? "Model prices are built in for a few models; LiveKit's full price list couldn't be fetched.")")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if detail.room == nil && !detail.loadingObservability {
                     Text("LiveKit didn't return participant times for this session, so connection costs are missing.").font(.caption).foregroundStyle(.orange)

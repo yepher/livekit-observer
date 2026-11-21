@@ -54,10 +54,19 @@ struct PricePlan: Identifiable, Sendable {
     let observabilityAudioMinute: Double
     let observabilityEvent: Double
     let noiseCancellationMinute: Double
-    let inference: [ModelRate]
+    /// Built in for a few models; replaced by LiveKit's full price list once it has been fetched.
+    var inference: [ModelRate]
     let note: String
 
     var name: String { id }
+
+    /// This plan with model prices from LiveKit's price list, when the list has prices for it.
+    func with(_ catalog: PricingCatalog?) -> PricePlan {
+        guard let rates = catalog?.rates[id.lowercased()], !rates.isEmpty else { return self }
+        var plan = self
+        plan.inference = rates
+        return plan
+    }
 
     func rate(model: String, unit: Unit) -> Double? {
         inference.filter { $0.unit == unit && (model == $0.model || model.hasPrefix($0.model)) }
@@ -78,15 +87,83 @@ struct PricePlan: Identifiable, Sendable {
         ],
         note: "Scale: $500 a month includes 50,000 agent minutes, 1.5M participant minutes, 3 TB downstream, 8,000 transcode minutes, 50,000 observability audio minutes, 5M observability events, 10,000 noise cancellation minutes, and $50 of inference.")
 
-    /// Ship's rates from livekit.com/pricing. Its inference is billed at list model prices, which the page does not give.
+    /// Ship's rates from livekit.com/pricing. Its model prices come from LiveKit's price list once fetched.
     static let ship = PricePlan(
         id: "Ship", monthly: 50, agentMinute: 0.01, participantMinute: 0.0005, downstreamGB: 0.12,
         transcodeAudioMinute: 0.005, observabilityAudioMinute: 0.005, observabilityEvent: 0.00003, noiseCancellationMinute: 0.0012,
         inference: [],
-        note: "Ship: $50 a month includes 5,000 agent minutes, 150,000 participant minutes, 250 GB downstream, 600 transcode minutes, and $5 of inference. Inference prices for Ship are not listed here.")
+        note: "Ship: $50 a month includes 5,000 agent minutes, 150,000 participant minutes, 250 GB downstream, 600 transcode minutes, and $5 of inference. Inference is billed at Ship's model prices.")
 
     static let all = [scale, ship]
     static func named(_ id: String) -> PricePlan { all.first { $0.id == id } ?? scale }
+}
+
+/// LiveKit Inference prices for every model and plan, from the price list the LiveKit docs server publishes (the
+/// same data as `lk docs pricing-info --json`). Fetched at most once a day and cached; until then, or if it can't be
+/// reached, the built-in rates are used. Connection, recording, and other rates stay built in: the list gives
+/// those only as sentences.
+struct PricingCatalog: Sendable {
+    let fetched: Date
+    /// Model prices by plan ID ("build", "ship", "scale").
+    let rates: [String: [PricePlan.ModelRate]]
+
+    static let endpoint = URL(string: "https://docs.livekit.io/mcp/")!
+    static let maximumAge: TimeInterval = 24 * 3600
+
+    init(fetched: Date, rates: [String: [PricePlan.ModelRate]]) {
+        self.fetched = fetched
+        self.rates = rates
+    }
+
+    /// Reads the price list's `inference` section: speech-to-text per minute, LLM tokens per million, and
+    /// text-to-speech characters per million.
+    init?(json: JSONValue, fetched: Date) {
+        guard let inference = json["inference"] else { return nil }
+        var rates: [String: [PricePlan.ModelRate]] = [:]
+        for kind in ["stt", "llm", "tts"] {
+            for model in inference[kind]?.array ?? [] {
+                guard let id = model["model_id"]?.string else { continue }
+                for rate in model["rates"]?.array ?? [] {
+                    let (unit, scale): (PricePlan.Unit?, Double) = switch rate["metric"]?.string {
+                    case "minute_usage": (.audioHour, 60)
+                    case "input_tokens": (.inputTokens, 1)
+                    case "output_tokens": (.outputTokens, 1)
+                    case "character_usage": (.characters, 1)
+                    default: (nil, 1)
+                    }
+                    guard let unit else { continue }
+                    for plan in ["build", "ship", "scale"] {
+                        if let price = rate[plan]?.double { rates[plan, default: []].append(.init(model: id, unit: unit, price: price * scale)) }
+                    }
+                }
+            }
+        }
+        guard !rates.isEmpty else { return nil }
+        self.init(fetched: fetched, rates: rates)
+    }
+
+    /// Asks the docs server for the price list. It answers as a server-sent event holding a JSON-RPC result,
+    /// whose text is the price list.
+    static func download() async throws -> Data {
+        var request = URLRequest(url: endpoint, timeoutInterval: 30)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("application/json, text/event-stream", forHTTPHeaderField: "accept")
+        request.httpBody = Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_pricing_info","arguments":{"format":"json"}}}"#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+        return try priceList(fromResponse: data)
+    }
+
+    /// The price list inside a docs server response, which is either plain JSON or server-sent events.
+    static func priceList(fromResponse data: Data) throws -> Data {
+        let text = String(decoding: data, as: UTF8.self)
+        let body = text.hasPrefix("{") ? text : text.split(separator: "\n").filter { $0.hasPrefix("data:") }
+            .map { $0.dropFirst(5).trimmingCharacters(in: .whitespaces) }.joined()
+        let reply = try JSONValue.parse(Data(body.utf8))
+        guard let list = reply["result"]?["content"]?.array?.first?["text"]?.string else { throw URLError(.cannotParseResponse) }
+        return Data(list.utf8)
+    }
 }
 
 /// One line of a session's cost: what was used, the rate, and the cost (nil when the rate is unknown
@@ -167,6 +244,11 @@ enum SessionCost {
                     add(.inference, "LLM \(model) \(label)", quantity, "rate unknown", nil)
                 }
             }
+        }
+
+        // Say so when the traces show no LLM at all (a scripted agent, say), rather than leave the line out.
+        if input.isEmpty, !spans.isEmpty {
+            add(.inference, "LLM", "none", "no LLM requests in the traces", 0)
         }
 
         // Speech-to-text audio, from the agent's usage metrics.
