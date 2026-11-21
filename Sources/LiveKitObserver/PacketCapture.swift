@@ -1,28 +1,6 @@
+import ObserverCore
 import CryptoKit
 import Foundation
-
-struct CaptureSession: Codable, Hashable, Sendable {
-    // Phase 1 settings use the configured CLI name. Keep this stable until ProjectRef migration.
-    let projectKey: String
-    let projectName: String
-    let sessionID: String
-    let roomName: String
-    let startedAt: Date?
-    let endedAt: Date?
-}
-
-struct PacketCapture: Codable, Identifiable, Hashable, Sendable {
-    enum Format: String, Codable, Sendable { case pcap, pcapng }
-    let id: UUID
-    let session: CaptureSession
-    let originalName: String
-    let format: Format
-    let byteCount: Int64
-    let sha256: String
-    let importedAt: Date
-    let source: String
-    var filename: String { "capture." + format.rawValue }
-}
 
 enum CaptureError: LocalizedError {
     case message(String)

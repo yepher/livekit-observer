@@ -2,14 +2,14 @@ import Foundation
 
 /// Loosely typed JSON. `lk analytics --json` is in beta, so models read fields
 /// defensively from this instead of failing on an unexpected shape.
-enum JSONValue: Hashable, Sendable, CustomStringConvertible {
+public enum JSONValue: Hashable, Sendable, CustomStringConvertible {
     case string(String), number(Double), bool(Bool), object([String: JSONValue]), array([JSONValue]), null
 
-    static func parse(_ data: Data) throws -> JSONValue {
+    public static func parse(_ data: Data) throws -> JSONValue {
         try JSONValue(any: JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]))
     }
 
-    init(any: Any) {
+    public init(any: Any) {
         switch any {
         case let v as NSNumber where CFGetTypeID(v) == CFBooleanGetTypeID(): self = .bool(v.boolValue)
         case let v as NSNumber: self = .number(v.doubleValue)
@@ -20,12 +20,12 @@ enum JSONValue: Hashable, Sendable, CustomStringConvertible {
         }
     }
 
-    subscript(key: String) -> JSONValue? {
+    public subscript(key: String) -> JSONValue? {
         if case .object(let o) = self { return o[key] }
         return nil
     }
 
-    var string: String? {
+    public var string: String? {
         switch self {
         case .string(let s): return s
         case .number(let n): return n == n.rounded() && abs(n) < 1e15 ? String(Int64(n)) : String(n)
@@ -34,20 +34,20 @@ enum JSONValue: Hashable, Sendable, CustomStringConvertible {
         }
     }
     /// Numbers, including the int64 values the API encodes as strings ("12").
-    var double: Double? {
+    public var double: Double? {
         switch self {
         case .number(let n): return n
         case .string(let s): return Double(s)
         default: return nil
         }
     }
-    var bool: Bool? { if case .bool(let b) = self { return b }; return nil }
-    var array: [JSONValue]? { if case .array(let a) = self { return a }; return nil }
-    var object: [String: JSONValue]? { if case .object(let o) = self { return o }; return nil }
-    var date: Date? { string.flatMap(ISODate.parse) }
+    public var bool: Bool? { if case .bool(let b) = self { return b }; return nil }
+    public var array: [JSONValue]? { if case .array(let a) = self { return a }; return nil }
+    public var object: [String: JSONValue]? { if case .object(let o) = self { return o }; return nil }
+    public var date: Date? { string.flatMap(ISODate.parse) }
 
     /// The list in a response: a bare array, `items`, or the first array of objects found.
-    var items: [JSONValue] {
+    public var items: [JSONValue] {
         if let a = array { return a }
         if let a = self["items"]?.array { return a }
         guard let o = object else { return [] }
@@ -57,7 +57,7 @@ enum JSONValue: Hashable, Sendable, CustomStringConvertible {
         return []
     }
 
-    var description: String {
+    public var description: String {
         switch self {
         case .string(let s): return s
         case .number, .bool: return string ?? ""
@@ -68,7 +68,7 @@ enum JSONValue: Hashable, Sendable, CustomStringConvertible {
         }
     }
 
-    var foundation: Any {
+    public var foundation: Any {
         switch self {
         case .string(let s): return s
         case .number(let n): return n
@@ -80,11 +80,11 @@ enum JSONValue: Hashable, Sendable, CustomStringConvertible {
     }
 }
 
-enum ISODate {
+public enum ISODate {
     private static let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
     private static let whole = Date.ISO8601FormatStyle()
 
-    static func parse(_ text: String) -> Date? {
+    public static func parse(_ text: String) -> Date? {
         if let d = try? fractional.parse(text) { return d }
         if let d = try? whole.parse(text) { return d }
         // Nanosecond precision ("…:58.212345678Z") is more than the format style accepts.

@@ -1,0 +1,17 @@
+{
+  "items": [
+    {
+      "sessionId": "RM_synthetic",
+      "roomName": "fixture-call",
+      "status": "SESSION_STATUS_CLOSED",
+      "startedAt": "2026-11-20T12:00:00Z",
+      "endedAt": "2026-11-20T12:01:00Z",
+      "hasDetailData": true,
+      "tags": []
+    }
+  ],
+  "pageInfo": {
+    "nextCursor": "synthetic-opaque-cursor",
+    "hasMore": true
+  }
+}

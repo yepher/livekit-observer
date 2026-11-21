@@ -1,3 +1,4 @@
+import ObserverCore
 import AppKit
 import Foundation
 import Observation
@@ -12,7 +13,10 @@ struct AppSettings {
     var project: String? { UserDefaults.standard.string(forKey: Self.projectKey).flatMap { $0.isEmpty ? nil : $0 } }
 
     /// Per-project settings are stored under the project name, or "default" for `lk`'s default project.
-    static func key(for project: String?) -> String { project ?? "default" }
+    static func key(for project: String?) -> String {
+        guard let project else { return "default" }
+        return UserDefaults.standard.string(forKey: "projectIdentity." + project) ?? project
+    }
 
     static func storage(for project: String?) -> StorageSettings {
         guard let data = UserDefaults.standard.data(forKey: "storage." + key(for: project)) else { return StorageSettings() }
@@ -21,10 +25,16 @@ struct AppSettings {
 
     static func setStorage(_ settings: StorageSettings, secret: String?, for project: String?) {
         UserDefaults.standard.set(try? JSONEncoder().encode(settings), forKey: "storage." + key(for: project))
-        if let secret { Keychain.setSecret(secret, for: key(for: project)) }
+        if let secret, Keychain.setSecret(secret, for: key(for: project)) {
+            UserDefaults.standard.removeObject(forKey: "storageSecretAlias." + key(for: project))
+        }
     }
 
-    static func storageSecret(for project: String?) -> String { Keychain.secret(for: key(for: project)) }
+    static func storageSecret(for project: String?) -> String {
+        let identity = key(for: project)
+        let legacy = UserDefaults.standard.string(forKey: "storageSecretAlias." + identity)
+        return Keychain.secret(for: legacy ?? identity)
+    }
 
     /// The Cloud project ID (`p_…`) for dashboard links, when `lk` does not know it.
     static func dashboardProjectId(for project: String?) -> String {
@@ -75,6 +85,9 @@ struct RecordingSource: Identifiable, Hashable, Sendable {
 /// The detail of one session, loaded on selection.
 @MainActor @Observable
 final class SessionDetail {
+    let mediaLease = UUID()
+    deinit { let lease = mediaLease; Task { await MediaCache.shared.release(lease) } }
+    var simulationJudge: SimulationJob?
     /// Updated in place when the session list refreshes, so a refresh doesn't reset what's open.
     var row: SessionRow
     var transcript: [TranscriptItem] = []
@@ -84,11 +97,14 @@ final class SessionDetail {
     /// Participants' connected time and bandwidth, for the cost breakdown.
     var room: RoomUsage?
     var dataState: String?
+    var resourceStates: [SessionResource: ResourceReadiness] = [:]
     var insights: SessionInsights?
     var observabilityError: LiveKitCLIError?
     var audioError: String?
+    var egressError: String?
     var loadingObservability = false
     var loadingAudio = false
+    var audioRevision = 0
     var sources: [RecordingSource] = [] { didSet { findTTSStatic() } }
     /// Each recording's channels as mono files, for playback and skimming.
     var channelFiles: [RecordingSource.Kind: [URL]] = [:]
@@ -101,6 +117,9 @@ final class SessionDetail {
     var alignment: Alignment = .reported
     /// Stretches marked while reviewing, highlighted in every view; saved per session.
     var flags: [Flag] = []
+    var transcriptionComparisons: [TranscriptionComparison] = []
+    var aiReview: AIReviewResult?
+    var aiChargeRevision = 0
     /// Spans expanded in the trace tree. Kept here so the tree can be rebuilt without collapsing.
     var expandedSpans: Set<String> = []
     /// Possible static in the agent's TTS audio, per recording, on the session's clock.
@@ -139,6 +158,10 @@ final class SessionDetail {
 
 @MainActor @Observable
 final class AppModel {
+    var section: AppSection = .sessions
+    let operations = OperationsModel()
+    let monitor = AgentMonitor()
+    static var isTesting: Bool { NSClassFromString("XCTestCase") != nil || NSClassFromString("XCTest.XCTestCase") != nil || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil }
     let captures = PacketCaptureModel()
     private var refreshGeneration = UUID()
     var rows: [SessionRow] = []
@@ -146,19 +169,57 @@ final class AppModel {
     var detail: SessionDetail?
     var loading = false
     var liveKitError: LiveKitCLIError?
-    /// Whether the session list came from LiveKit, so a missing session means it has expired there.
+    /// Whether a remote summary page has been loaded. Absence from a page never implies expiry.
     var liveKitLoaded = false
     /// The Cloud project ID, for dashboard links.
     var projectId: String?
     /// The projects saved in `lk`, and the LiveKit user it is signed in as.
-    var projects: [LKProject] = []
+    var projects: [ProjectRef] = []
     var signedInUser: String?
     var storageError: String?
     /// Whether egress storage is set up for the current project.
     var storageConfigured = false
-    var filter = ""
-    var onlyWithRecording = false
-    var onlyFlagged = false
+    var filter = "" { didSet { if filter != oldValue { scheduleCachedQuery() } } }
+    var onlyWithRecording = false { didSet { if onlyWithRecording != oldValue { scheduleCachedQuery() } } }
+    var onlyFlagged = false { didSet { if onlyFlagged != oldValue { scheduleCachedQuery() } } }
+    var sessionQuery = SessionQuery()
+    var coverage: SessionCoverage?
+    var loadingMore = false
+    var cachedHasMore = false
+    var indexError: String?
+    var recordingScan: RecordingScan?
+    var scanningRecordings = false
+    var cliVersion: CLIVersion?
+    var showingProjectSwitcher = false
+    var openWorkspaceAfterSwitcher = false
+    var showingWorkspace = false
+    var showingQuickJump = false
+    var workspaceFilter: String?
+    var scrollAnchor: String?
+    var restorationAnchor: SessionBookmark?
+    var needsScrollRestoration = false
+    private var savedNavigation: ProjectNavigation?
+    private var projectStates = ProjectStateCache()
+    private var restoringState = false
+    private var refreshTask: Task<Void, Never>?
+    private var queryTask: Task<Void, Never>?
+    private var pageTask: Task<Void, Never>?
+    private var recordingTask: Task<Void, Never>?
+    let sessionStore: SessionStore
+    private let mediaCacheDirectory: URL
+    private var projectedAttachmentRevision: [String: Int] = [:]
+    var projectIdentity: String { AppSettings.key(for: project) }
+    var selectedProject: ProjectRef? { projects.first { $0.selection == project || $0.id == project } }
+    private var syncScope: String { (signedInUser ?? "signed-out") + ":" + projectIdentity }
+    var canLoadMore: Bool { cachedHasMore || coverage?.nextCursor != nil }
+    var coverageText: String {
+        if let error = indexError { return error }
+        if let coverage {
+            let freshness = coverage.fetchedAt.formatted(date: .abbreviated, time: .shortened)
+            return "\(rows.count) loaded · \(coverage.complete ? "Range indexed" : "Partial history") · Updated \(freshness)"
+        }
+        return "\(rows.count) cached · Remote coverage unknown"
+    }
     /// Sessions flagged in the list so they are easy to find again; saved on this Mac. Session IDs are unique across projects.
     private(set) var flaggedSessions = Set(UserDefaults.standard.stringArray(forKey: AppModel.flaggedSessionsKey) ?? [])
     /// Sessions with flags in them (each flag carries a note), shown with a paperclip.
@@ -169,50 +230,105 @@ final class AppModel {
     var renamingFlag: Flag.ID?
 
     private var settings = AppSettings()
-    private var manifests: [String: EgressRecording] = [:]
     private var detailTask: Task<Void, Never>?
+    private var audioTask: Task<Void, Never>?
+    private var analysisTask: Task<Void, Never>?
     /// Recently computed spectrograms, by file, so revisiting a session is instant.
     private var spectrogramCache: [URL: Spectrogram] = [:]
 
-    /// The agent that ran each session, by session ID; "" when the session's logs name none.
-    /// Fetched as rows appear, since LiveKit's session list does not include it.
-    private(set) var agentNames: [String: String] = AppModel.loadAgentNames()
-    private var agentNameRequested: Set<String> = []
-    private var agentNameQueue: [String] = []
-    private var agentNameFetches = 0
-    /// Moments flagged from the lesson page per session, read from warning logs as rows appear; cached once settled.
-    private(set) var lessonFlagCounts: [String: Int] = AppModel.loadLessonFlagCounts()
-    private var lessonFlagsRequested: Set<String> = []
-    private var lessonFlagQueue: [String] = []
-    private var lessonFlagFetches = 0
-    private static var lessonFlagsFile: URL { AppSettings.cacheDirectory.appendingPathComponent("lesson-flags.json") }
-    private static var agentNamesFile: URL { AppSettings.cacheDirectory.appendingPathComponent("agent-names.json") }
-
-    var visibleRows: [SessionRow] {
-        rows.filter { row in
-            (!onlyWithRecording || row.recording != nil)
-                && (!onlyFlagged || flaggedSessions.contains(row.id) || flaggedInLesson(row))
-                && (filter.isEmpty || row.roomName.localizedCaseInsensitiveContains(filter) || row.id.localizedCaseInsensitiveContains(filter))
-        }
-    }
+    /// Enrichment is read from the index or the selected session, never requested by scrolling.
+    private(set) var agentNames: [String: String] = [:]
+    private(set) var lessonFlagCounts: [String: Int] = [:]
+    var visibleRows: [SessionRow] { rows }
 
     var cli: LiveKitCLI? {
-        LiveKitCLI.locate(override: settings.lkOverride).map { LiveKitCLI(executable: $0, project: settings.project) }
+        guard project?.hasPrefix("local:") != true else { return nil }
+        return LiveKitCLI.locate(override: settings.lkOverride).map { LiveKitCLI(executable: $0, project: selectedProject?.projectId ?? project) }
     }
 
     /// The project being shown, by `lk` name; nil is `lk`'s default project.
-    var project: String? { settings.project }
+    private(set) var project: String?
 
-    /// Switches to another `lk` project and reloads everything.
+    init(project: String? = nil, sessionStore: SessionStore = .shared, mediaCacheDirectory: URL = AppSettings.cacheDirectory) {
+        self.sessionStore = sessionStore
+        self.mediaCacheDirectory = mediaCacheDirectory
+        self.project = project ?? AppSettings().project
+        let navigation = ProjectNavigation.load(AppSettings.key(for: self.project))
+        savedNavigation = navigation
+        sessionQuery = navigation.query; filter = navigation.search
+        onlyFlagged = navigation.flagged; onlyWithRecording = navigation.recorded
+        section = AppSection(rawValue: navigation.section) ?? .sessions
+        restorationAnchor = navigation.anchor; scrollAnchor = navigation.anchor?.id; needsScrollRestoration = navigation.anchor != nil
+    }
+
+    func persistNavigation() {
+        guard project != nil, !restoringState else { return }
+        var navigation = ProjectNavigation()
+        navigation.selection = selection
+        navigation.anchor = rows.first(where: { $0.id == scrollAnchor }).map(SessionBookmark.init) ?? restorationAnchor
+        navigation.section = section.rawValue
+        navigation.agent = operations.selectedAgent; navigation.run = operations.selectedRun; navigation.room = operations.selectedRoom
+        navigation.query = sessionQuery; navigation.search = filter; navigation.flagged = onlyFlagged; navigation.recorded = onlyWithRecording
+        navigation.save(projectIdentity)
+    }
+
+    func restoreOperationSelection() {
+        let navigation = ProjectNavigation.load(projectIdentity)
+        operations.selectedAgent = navigation.agent; operations.selectedRun = navigation.run; operations.selectedRoom = navigation.room
+    }
+
+    /// Retain three lightweight project views; release media when leaving a project.
     func selectProject(_ name: String?) {
+        guard name != project else { return }
+        persistNavigation()
+        projectStates.save(ProjectBrowseState(rows: rows, selection: selection, query: sessionQuery, search: filter,
+                                            onlyFlagged: onlyFlagged, onlyRecording: onlyWithRecording, coverage: coverage, navigation: ProjectNavigation.load(projectIdentity)), for: projectIdentity)
+        refreshTask?.cancel(); queryTask?.cancel(); pageTask?.cancel(); recordingTask?.cancel(); detailTask?.cancel(); audioTask?.cancel(); analysisTask?.cancel()
         refreshGeneration = UUID()
-        UserDefaults.standard.set(name ?? "", forKey: AppSettings.projectKey)
-        projectId = nil
         selection = nil
-        rows = []
-        manifests = [:]
-        liveKitLoaded = false
+        detail = nil
+        spectrogramCache.removeAll()
+        UserDefaults.standard.set(name ?? "", forKey: AppSettings.projectKey)
+        project = name
+        projectId = selectedProject?.projectId
+        agentNames = [:]; lessonFlagCounts = [:]
+        restoringState = true
+        let state = projectStates.state(for: projectIdentity)
+        let navigation = state?.navigation ?? ProjectNavigation.load(projectIdentity)
+        savedNavigation = navigation
+        section = AppSection(rawValue: navigation.section) ?? .sessions
+        restorationAnchor = navigation.anchor; scrollAnchor = navigation.anchor?.id; needsScrollRestoration = navigation.anchor != nil
+        rows = state?.rows ?? []
+        sessionQuery = state?.query ?? navigation.query
+        filter = state?.search ?? navigation.search
+        onlyFlagged = state?.onlyFlagged ?? navigation.flagged
+        onlyWithRecording = state?.onlyRecording ?? navigation.recorded
+        coverage = state?.coverage
+        restoringState = false
+        liveKitLoaded = false; liveKitError = nil; storageError = nil; recordingScan = nil
+        var recent = UserDefaults.standard.stringArray(forKey: "recentProjects") ?? []
+        recent.removeAll { $0 == name }; if let name { recent.insert(name, at: 0) }
+        UserDefaults.standard.set(Array(recent.prefix(9)), forKey: "recentProjects")
+        selection = state?.selection
         Task { await refresh() }
+    }
+
+    private func scheduleCachedQuery() {
+        guard !restoringState else { return }
+        restorationAnchor = nil; scrollAnchor = nil; needsScrollRestoration = false
+        queryTask?.cancel()
+        let generation = refreshGeneration
+        queryTask = Task {
+            do { try await Task.sleep(for: .milliseconds(200)); try Task.checkCancellation() }
+            catch { return }
+            await loadCached(generation: generation)
+        }
+    }
+
+    func applySessionQuery() async {
+        restorationAnchor = nil; scrollAnchor = nil; needsScrollRestoration = false
+        rows = []; coverage = nil
+        await refresh()
     }
 
     /// The storage connection for the current project, or nil when none is set up.
@@ -246,20 +362,71 @@ final class AppModel {
         selectProject(name)
     }
 
-    /// Reloads the project list and sign-in state from `lk`.
+    /// Reload secret-free metadata, then migrate preferences without touching the stored secrets.
+    private var restoredAnnotations = false
+    private var localProjects: [ProjectRef] = []
     func loadAccount() async {
-        guard let cli else { return }
-        projects = (try? await cli.projects()) ?? []
-        signedInUser = await cli.signedInUser()
+        if !restoredAnnotations {
+            do {
+                let notes = Dictionary(uniqueKeysWithValues: sessionsWithNotes.map { ($0, SessionDetail.loadFlags($0)) })
+                let refs = try await AnnotationStore.shared.recoverLegacy(flagged: flaggedSessions, notes: notes)
+                try await sessionStore.restoreAnnotations(refs)
+                if refs.contains(where: { $0.project == AnnotationStore.unassigned && ($0.flagged || $0.noted) }) {
+                    localProjects = [ProjectRef(id: AnnotationStore.unassigned, name: "Unassigned local notes", url: "")]
+                }
+                restoredAnnotations = true
+            } catch { indexError = "Local annotation recovery: " + error.localizedDescription }
+        }
+        for item in localProjects where !projects.contains(where: { $0.id == item.id }) { projects.append(item) }
+        guard let executable = LiveKitCLI.locate(override: settings.lkOverride) else { projects = localProjects; return }
+        let cli = LiveKitCLI(executable: executable, project: nil)
+        do {
+            cliVersion = nil
+            cliVersion = try await cli.version()
+            let found = try await cli.projects()
+            try Task.checkCancellation()
+            projects = found + localProjects
+            for item in found {
+                guard let name = item.lkName, name != item.id else { continue }
+                let previousIdentity = AppSettings.key(for: name)
+                for prefix in ["storage.", "projectId."] {
+                    let defaults = UserDefaults.standard
+                    let source = defaults.object(forKey: prefix + previousIdentity) != nil ? previousIdentity : name
+                    if defaults.object(forKey: prefix + item.id) == nil, let old = defaults.object(forKey: prefix + source) {
+                        defaults.set(old, forKey: prefix + item.id)
+                        if prefix == "storage." { defaults.set(defaults.string(forKey: "storageSecretAlias." + source) ?? source, forKey: "storageSecretAlias." + item.id) }
+                    }
+                }
+                UserDefaults.standard.set(item.id, forKey: "projectIdentity." + name)
+            }
+            signedInUser = await cli.signedInUser()
+            try Task.checkCancellation()
+            if project == nil, let explicit = found.first(where: \.isDefault) ?? (found.count == 1 ? found.first : nil) {
+                UserDefaults.standard.set(explicit.selection, forKey: AppSettings.projectKey)
+                project = explicit.selection
+            }
+        } catch is CancellationError { return }
+        catch let error as LiveKitCLIError { liveKitError = error }
+        catch { liveKitError = LiveKitCLIError(kind: .failed, message: error.localizedDescription) }
     }
 
     /// LiveKit's model prices, for the cost breakdown; nil until read from the cache or the docs server.
     var pricing: PricingCatalog?
+    var inferenceModels = InferenceModels.bundled()
+    func availableModels(unit: PricePlan.Unit) -> [String] {
+        Array(Set(plan.inference.filter { $0.unit == unit }.map(\.model))).filter { inferenceModels[$0]?.isRetired() != true }.sorted()
+    }
+    func modelLabel(_ id: String) -> String {
+        let info = inferenceModels[id]
+        return id + (info?.isRetired() == true ? " · Retired" : info?.deprecated == true ? " · Deprecated" : "") + (info?.eu == true ? " · EU-capable" : "")
+    }
+    var plan: PricePlan { PricePlan.named(UserDefaults.standard.string(forKey: "pricePlan") ?? PricePlan.scale.id).with(pricing) }
 
     private static var pricingFile: URL { AppSettings.cacheDirectory.appendingPathComponent("pricing.json") }
 
     /// Reads the cached price list, then fetches a new one if it is more than a day old. Failures keep what we have.
     func loadPricing() async {
+        if let values = await InferenceModels.refresh(cache: AppSettings.cacheDirectory.appendingPathComponent("inference-models.json")) { inferenceModels = values }
         let file = Self.pricingFile
         if pricing == nil, let data = try? Data(contentsOf: file), let json = try? JSONValue.parse(data) {
             let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
@@ -274,34 +441,184 @@ final class AppModel {
     }
 
     func refresh() async {
+        refreshTask?.cancel()
+        pageTask?.cancel(); recordingTask?.cancel()
+        let task = Task { await refreshProject() }
+        refreshTask = task
+        await task.value
+    }
+
+    private func refreshProject() async {
         let generation = UUID()
+        let residentLimit = max(100, rows.count)
         refreshGeneration = generation
-        Task { await loadPricing() }
-        settings = AppSettings()
-        loading = true
+        loading = true; loadingMore = false; scanningRecordings = false
         defer { if refreshGeneration == generation { loading = false } }
         await captures.load()
-        guard refreshGeneration == generation else { return }
-        mergeLocalCaptureRows()
-        async let account: Void = loadAccount()
-        async let sessions = loadSessions(generation: generation)
-        async let recordings = loadRecordings(generation: generation)
-        _ = await account
-        guard refreshGeneration == generation else { return }
+        await loadCached(generation: generation, limit: residentLimit)
+        guard !Task.isCancelled, generation == refreshGeneration else { return }
+        await loadAccount()
+        guard !Task.isCancelled, generation == refreshGeneration else { return }
         let override = AppSettings.dashboardProjectId(for: project)
-        let known = projects.first { $0.name == project } ?? (project == nil && projects.count == 1 ? projects.first : nil)
-        projectId = override.isEmpty ? known?.projectId : override
-        let (s, r) = await (sessions, recordings)
-        guard refreshGeneration == generation else { return }
-        rows = SessionRow.merge(sessions: s, recordings: r)
-        mergeLocalCaptureRows()
-        guard let selection, let row = rows.first(where: { $0.id == selection }), detail?.row != row else { return }
-        if let detail, detail.row.id == row.id, detail.row.recording == row.recording, (detail.row.session == nil) == (row.session == nil) {
-            // Same session with newer details, such as a live session that has ended: keep it open and reread its data.
-            detail.row = row
-            reloadObservability()
-        } else {
-            openSelection()
+        projectId = override.isEmpty ? selectedProject?.projectId : override
+        await loadCached(generation: generation, limit: residentLimit)
+        guard !Task.isCancelled, generation == refreshGeneration else { return }
+        // Warm the recording index without restoring the old full-bucket scan on refresh.
+        scanRecordings(automatic: true)
+        guard let cli, project != nil, cliVersion != nil, !Task.isCancelled else { return }
+        let identity = projectIdentity, scope = syncScope, query = sessionQuery
+        do {
+            let previous = try await sessionStore.coverage(scope: scope, query: query)
+            let previousIDs = Set(try await sessionStore.page(project: identity, query: query).map { $0.row.id })
+            let page = try await cli.sessionPage(query: query)
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
+            try await sessionStore.ingest(page, project: identity, scope: scope, query: query, flagged: flaggedSessions, noted: sessionsWithNotes)
+            // The head refresh overlaps a known page: retain the older traversal rather than replaying history.
+            if let previous, previous.canResume, !previousIDs.isDisjoint(with: page.sessions.map(\.id)) {
+                var updated = previous; updated.fetchedAt = Date(); updated.error = nil
+                try await sessionStore.setCoverage(updated, scope: scope, query: query)
+            }
+            liveKitLoaded = true; liveKitError = nil
+            await loadCached(generation: generation, limit: max(100, rows.count))
+            // Revisit a bounded number of long-running calls even when they began before the head page.
+            let pending = try await sessionStore.unsettled(project: identity)
+            var backgroundCLI = cli; backgroundCLI.priority = .background
+            for id in pending {
+                try Task.checkCancellation()
+                if let session = try? await backgroundCLI.session(id) {
+                    guard generation == refreshGeneration else { return }
+                    try await sessionStore.upsert(session, project: identity, flagged: flaggedSessions.contains(id), noted: sessionsWithNotes.contains(id))
+                }
+            }
+            // Only revisit resources previously opened by a reviewer, at most four per refresh.
+            var reconciledCost = false
+            for pending in (try await sessionStore.pendingResources(project: identity)) {
+                try Task.checkCancellation()
+                guard generation == refreshGeneration else { return }
+                do {
+                    let value = try await backgroundCLI.resource(pending.id, kind: pending.kind)
+                    guard generation == refreshGeneration, !Task.isCancelled else { return }
+                    try await sessionStore.recordResource(project: identity, id: pending.id, kind: pending.kind, readiness: value.readiness)
+                    if pending.kind == .logs, value.readiness.state == .settled {
+                        let logs = value.json.items.enumerated().map { LogRecord(json: $1, index: $0) }
+                        let name = logs.lazy.compactMap { $0.attributes["lk.agent_name"]?.string }.first { !$0.isEmpty }
+                        let count = SessionDetail.lessonFlags(logs: logs, transcript: []).count
+                        try await sessionStore.enrich(project: identity, id: pending.id, agent: name, lessonFlags: count)
+                    }
+                    // At most one already-calculated call is reconciled per refresh. Its saved
+                    // partial total is replaced when late resources become available.
+                    if !reconciledCost, value.readiness.state == .settled,
+                       let usage = try await sessionStore.costUsage(project: identity, id: pending.id), usage.partial,
+                       let row = try await sessionStore.page(project: identity, query: query, ids: [pending.id]).first?.row {
+                        reconciledCost = true
+                        let documents = await SessionResources.load(source: backgroundCLI, id: pending.id)
+                        guard generation == refreshGeneration, !Task.isCancelled else { return }
+                        let updated = CostUsageSnapshot.make(row: row, documents: documents, plan: plan, priceDate: pricing?.fetched)
+                        if documents.values.contains(where: { if case .success = $0 { return true }; return false }) {
+                            try await sessionStore.saveCostUsage(project: identity, id: pending.id, usage: updated)
+                        }
+                    }
+                } catch is CancellationError { throw CancellationError() }
+                catch { try await sessionStore.recordResource(project: identity, id: pending.id, kind: pending.kind, readiness: ResourceReadiness(error: error)) }
+            }
+            await loadCached(generation: generation, limit: max(100, rows.count))
+            if detail?.row.session != nil { reloadObservability() }
+            let retention = UserDefaults.standard.integer(forKey: "summaryRetentionDays")
+            try await sessionStore.prune(project: identity, before: SessionQuery(days: retention == 0 ? 30 : max(1, retention)).start)
+        } catch is CancellationError { return }
+        catch {
+            guard generation == refreshGeneration else { return }
+            liveKitError = (error as? LiveKitCLIError) ?? LiveKitCLIError(kind: .failed, message: error.localizedDescription)
+            if var previous = coverage { previous.error = error.localizedDescription; try? await sessionStore.setCoverage(previous, scope: scope, query: query) }
+        }
+        if generation == refreshGeneration { Task { await loadPricing() } }
+    }
+
+    private func loadCached(generation: UUID, limit: Int = 100, after: SessionBookmark? = nil, incomingIDs: [String]? = nil) async {
+        let identity = projectIdentity, query = sessionQuery, scope = syncScope
+        let search = filter, flagged = onlyFlagged, recorded = onlyWithRecording
+        guard project != nil else { return }
+        do {
+            let local = captures.items.filter { captureMatchesProject($0.session) }.map(\.session)
+            if projectedAttachmentRevision[identity] != captures.revision {
+                let revision = captures.revision
+                try await sessionStore.attach(local, project: identity)
+                projectedAttachmentRevision[identity] = revision
+            }
+            let source = recordingSourceKey
+            let restored = incomingIDs == nil && after == nil ? restorationAnchor : nil
+            let bookmark = restored.map { SessionBookmark(startedAt: $0.startedAt, id: $0.id + "\u{10FFFF}") }
+            var page = try await sessionStore.page(project: identity, query: query, after: incomingIDs == nil ? (after ?? bookmark) : nil, limit: limit,
+                                                   search: search, onlyFlagged: flagged, onlyRecording: recorded, recordingSource: source, ids: incomingIDs)
+            if let source {
+                for i in page.indices {
+                    if var recording = page[i].row.recording, let size = try await sessionStore.recordingSize(source: source, key: recording.audioKey) {
+                        recording.size = size; page[i].row.recording = recording
+                    }
+                }
+            }
+            let knownCoverage = try await sessionStore.coverage(scope: scope, query: query)
+            let scan: RecordingScan?
+            if let source { scan = try await sessionStore.recordingScan(source: source) } else { scan = nil }
+            guard generation == refreshGeneration, identity == projectIdentity, search == filter,
+                  flagged == onlyFlagged, recorded == onlyWithRecording, query == sessionQuery, !Task.isCancelled else { return }
+            if after == nil { rows = page.map(\.row); agentNames = [:]; lessonFlagCounts = [:] }
+            else {
+                var merged = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+                for item in page { merged[item.row.id] = item.row }
+                rows = merged.values.sorted { SessionBookmark($0).startedAt == SessionBookmark($1).startedAt ? $0.id > $1.id : SessionBookmark($0).startedAt > SessionBookmark($1).startedAt }
+                rows = Array(rows.suffix(1000))
+            }
+            for item in page { agentNames[item.row.id] = item.agentName; lessonFlagCounts[item.row.id] = item.lessonFlags }
+            let ids = Set(rows.map(\.id)); agentNames = agentNames.filter { ids.contains($0.key) }; lessonFlagCounts = lessonFlagCounts.filter { ids.contains($0.key) }
+            cachedHasMore = page.count == limit
+            coverage = knownCoverage; recordingScan = scan; indexError = nil
+            if let saved = savedNavigation?.selection, rows.contains(where: { $0.id == saved }), selection == nil { selection = saved; savedNavigation = nil }
+            storageConfigured = source != nil
+            if let detail, let updated = rows.first(where: { $0.id == detail.row.id }) { updateOpenRow(updated) }
+            if incomingIDs != nil, let last = rows.last {
+                let more = try await sessionStore.page(project: identity, query: query, after: SessionBookmark(last), limit: 1,
+                                                       search: search, onlyFlagged: flagged, onlyRecording: recorded, recordingSource: source)
+                if generation == refreshGeneration, search == filter, query == sessionQuery { cachedHasMore = !more.isEmpty }
+            }
+        } catch { if generation == refreshGeneration { indexError = "Session index: " + error.localizedDescription } }
+    }
+
+    func loadMoreSessions() async {
+        guard !loadingMore, !loading else { return }
+        let task = Task { await loadNextPage() }
+        pageTask = task
+        await task.value
+    }
+
+    private func loadNextPage() async {
+        guard !loadingMore, !loading else { return }
+        let last = rows.last
+        loadingMore = true
+        let generation = refreshGeneration, identity = projectIdentity, scope = syncScope, query = sessionQuery
+        defer { if generation == refreshGeneration { loadingMore = false } }
+        let count = rows.count, bookmark = last.map(SessionBookmark.init)
+        await loadCached(generation: generation, after: bookmark)
+        guard generation == refreshGeneration, rows.count == count, rows.last?.id == last?.id,
+              let cursor = coverage?.nextCursor, let cli else { return }
+        do {
+            let page = try await cli.sessionPage(query: query, cursor: cursor)
+            guard generation == refreshGeneration, !Task.isCancelled else { return }
+            guard page.nextCursor != cursor else { throw LiveKitCLIError(kind: .failed, message: "LiveKit repeated the page cursor. Refresh this range to retry.") }
+            try await sessionStore.ingest(page, project: identity, scope: scope, query: query, flagged: flaggedSessions, noted: sessionsWithNotes)
+            // A remote traversal is not a snapshot: late arrivals may precede our oldest visible row.
+            // Merge those IDs too, rather than silently hiding them behind the local keyset bookmark.
+            await loadCached(generation: generation, after: bookmark, incomingIDs: page.sessions.map(\.id))
+            liveKitError = nil
+        } catch {
+            guard generation == refreshGeneration else { return }
+            liveKitError = (error as? LiveKitCLIError) ?? LiveKitCLIError(kind: .failed, message: error.localizedDescription)
+            if error.localizedDescription.localizedCaseInsensitiveContains("cursor") {
+                let invalidated = SessionCoverage(nextCursor: nil, fetchedAt: coverage?.fetchedAt ?? Date(), complete: false, error: error.localizedDescription)
+                try? await sessionStore.setCoverage(invalidated, scope: scope, query: query)
+                coverage = invalidated
+            }
         }
     }
 
@@ -309,169 +626,137 @@ final class AppModel {
         // An implicit CLI default can change outside the app. Require an explicit project
         // until the ProjectRef foundation can resolve that default authoritatively.
         guard let name = project, !name.isEmpty else { return nil }
-        return CaptureSession(projectKey: "lk:" + name, projectName: name, sessionID: row.id,
+        // Keep an existing attachment's target key, so deduplication and paths survive identity migration.
+        let existing = captures.items.first { captureMatchesProject($0.session) && $0.session.sessionID == row.id }?.session.projectKey
+        return CaptureSession(projectKey: existing ?? projectIdentity, projectName: selectedProject?.name ?? name, sessionID: row.id,
                               roomName: row.roomName, startedAt: row.startedAt, endedAt: row.endedAt)
     }
 
+    private func captureMatchesProject(_ session: CaptureSession) -> Bool {
+        session.projectKey == "lk:" + (project ?? "") || session.projectKey == projectIdentity
+            || selectedProject?.lkName.map { session.projectKey == "lk:" + $0 } == true
+    }
+
     func mergeLocalCaptureRows() {
-        var indexed = Dictionary(rows.filter { $0.session != nil || $0.recording != nil }.map { row in
-            var row = row
-            row.localCaptureSession = nil
-            return (row.id, row)
-        }, uniquingKeysWith: { first, _ in first })
-        if let project {
-            for capture in captures.items where capture.session.projectKey == "lk:" + project {
-                indexed[capture.session.sessionID, default: SessionRow(id: capture.session.sessionID)].localCaptureSession = capture.session
-            }
-        }
-        rows = indexed.values.sorted { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
+        let generation = refreshGeneration
+        Task { await loadCached(generation: generation, limit: max(100, rows.count)) }
     }
 
-    /// Looks up the agent name for a row the list is showing. Only sessions with observability data have logs to read.
-    func requestAgentName(for row: SessionRow) {
-        requestLessonFlags(for: row)
-        guard row.session?.hasDetailData == true, agentNames[row.id] == nil, agentNameRequested.insert(row.id).inserted else { return }
-        agentNameQueue.append(row.id)
-        pumpAgentNames()
-    }
-
-    /// Whether moments in a session were flagged from the lesson page: by its tag, its logs, or the open session's flags.
+    /// Unexamined log-derived flags remain unknown until a session is opened.
     func flaggedInLesson(_ row: SessionRow) -> Bool {
         if let detail, detail.row.id == row.id, detail.flags.contains(where: \.isFromLesson) { return true }
         return row.session?.flaggedInLesson == true || (lessonFlagCounts[row.id] ?? 0) > 0
     }
 
-    private func requestLessonFlags(for row: SessionRow) {
-        guard row.session?.hasDetailData == true, lessonFlagCounts[row.id] == nil || row.session?.status == "active",
-              lessonFlagsRequested.insert(row.id).inserted else { return }
-        lessonFlagQueue.append(row.id)
-        pumpLessonFlags()
+    private var recordingSourceKey: String? {
+        let config = AppSettings.storage(for: project)
+        guard !config.isEmpty else { return nil }
+        return [projectIdentity, config.endpoint, config.bucket, config.prefix].joined(separator: "|")
     }
 
-    private func pumpLessonFlags() {
-        guard let cli else { return }
-        while lessonFlagFetches < 3, let id = lessonFlagQueue.popLast() {
-            lessonFlagFetches += 1
-            Task {
-                let result = try? await cli.lessonFlagCount(id)
-                lessonFlagFetches -= 1
-                if let result { lessonFlagCounts[id] = result.count }
-                if let result, result.settled {
-                    saveLessonFlagCounts()
-                } else {
-                    lessonFlagsRequested.remove(id)  // logs may still arrive; check again the next time the row appears
+    /// Explicit, resumable discovery: one small object page and at most two manifest requests at once.
+    func scanRecordings(restart: Bool = false, automatic: Bool = false) {
+        guard !scanningRecordings else { return }
+        let generation = refreshGeneration, identity = projectIdentity
+        scanningRecordings = true
+        recordingTask = Task {
+            defer { if generation == refreshGeneration { scanningRecordings = false } }
+            do {
+                guard let source = recordingSourceKey, let client = try storageClient() else { return }
+                var scan = restart ? RecordingScan() : (try await sessionStore.recordingScan(source: source) ?? RecordingScan())
+                if automatic, scan.complete, Date().timeIntervalSince(scan.updatedAt) < 300 { return }
+                if scan.complete || restart { scan = RecordingScan(reconciling: true) }
+                let page = try await client.listPage(prefix: client.config.prefix, cursor: scan.cursor)
+                if let cursor = scan.cursor, page.nextToken == cursor { throw StorageError.message("Storage repeated its cursor. Restart the recording scan to retry.") }
+                try Task.checkCancellation()
+                var fetched: [(String, EgressRecording?)] = []
+                let candidates = page.objects.filter { $0.key.hasSuffix(".json") }
+                for pair in stride(from: 0, to: candidates.count, by: 2) {
+                    let batch = Array(candidates[pair..<min(pair + 2, candidates.count)])
+                    var missing: [StorageObject] = []
+                    for object in batch {
+                        let known = try await sessionStore.hasManifest(source: source, key: object.key)
+                        if !known || scan.reconciling { missing.append(object) }
+                    }
+                    try await withThrowingTaskGroup(of: (String, EgressRecording?).self) { group in
+                        for object in missing { group.addTask { (object.key, EgressRecording(manifest: try JSONValue.parse(try await client.manifest(object.key)))) } }
+                        for try await value in group { fetched.append(value) }
+                    }
+                    try Task.checkCancellation()
                 }
-                pumpLessonFlags()
-            }
-        }
-    }
-
-    private static func loadLessonFlagCounts() -> [String: Int] {
-        guard let data = try? Data(contentsOf: lessonFlagsFile) else { return [:] }
-        return (try? JSONDecoder().decode([String: Int].self, from: data)) ?? [:]
-    }
-
-    private func saveLessonFlagCounts() {
-        try? FileManager.default.createDirectory(at: AppSettings.cacheDirectory, withIntermediateDirectories: true)
-        try? JSONEncoder().encode(lessonFlagCounts).write(to: Self.lessonFlagsFile, options: .atomic)
-    }
-
-    private func pumpAgentNames() {
-        guard let cli else { return }
-        while agentNameFetches < 4, let id = agentNameQueue.popLast() {  // newest request first: the rows on screen now
-            agentNameFetches += 1
-            Task {
-                let result = try? await cli.agentName(id)
-                agentNameFetches -= 1
-                if let result, result.name != nil || result.settled {
-                    agentNames[id] = result.name ?? ""
-                    saveAgentNames()
-                } else {
-                    agentNameRequested.remove(id)  // try again the next time the row appears
+                guard generation == refreshGeneration else { return }
+                scan.cursor = page.nextToken; scan.complete = page.nextToken == nil; scan.objects += page.objects.count; scan.updatedAt = Date()
+                try await sessionStore.saveRecordingPage(source: source, project: identity, objects: page.objects, manifests: fetched, scan: scan)
+                recordingScan = scan; storageError = nil
+                await loadCached(generation: generation, limit: max(100, rows.count))
+                // A selected session can be outside the current filtered or paged list.
+                if let detail, let recording = try await sessionStore.recording(project: identity, id: detail.row.id, source: source),
+                   generation == refreshGeneration, detail === self.detail {
+                    var row = detail.row; row.recording = recording
+                    updateOpenRow(row)
                 }
-                pumpAgentNames()
-            }
+            } catch is CancellationError { }
+            catch { if generation == refreshGeneration { storageError = "Recording discovery: " + error.localizedDescription } }
         }
     }
 
-    private static func loadAgentNames() -> [String: String] {
-        guard let data = try? Data(contentsOf: agentNamesFile) else { return [:] }
-        return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
-    }
-
-    private func saveAgentNames() {
-        try? FileManager.default.createDirectory(at: AppSettings.cacheDirectory, withIntermediateDirectories: true)
-        try? JSONEncoder().encode(agentNames).write(to: Self.agentNamesFile, options: .atomic)
-    }
-
-    private func loadSessions(generation: UUID) async -> [LiveKitSession] {
-        guard refreshGeneration == generation else { return [] }
-        guard let cli else {
-            liveKitError = LiveKitCLIError(kind: .missingCLI, message: "The LiveKit CLI (lk) was not found. Install it with `brew install livekit-cli`.")
-            return []
+    func openIndexedSession(_ row: SessionRow) {
+        if !rows.contains(where: { $0.id == row.id }) {
+            rows.insert(row, at: 0)
+            if rows.count > 1000 { rows.removeLast() }
         }
+        section = .sessions; selection = row.id
+    }
+
+    func openRemoteSession(_ id: String) async {
+        if let row = rows.first(where: { $0.id == id }) { openIndexedSession(row); return }
+        guard let cli else { return }; let identity = projectIdentity
         do {
-            let sessions = try await cli.sessions()
-            guard refreshGeneration == generation else { return [] }
-            liveKitError = nil
-            liveKitLoaded = true
-            return sessions
-        } catch let error as LiveKitCLIError {
-            if refreshGeneration == generation { liveKitError = error }
-        } catch {
-            if refreshGeneration == generation { liveKitError = LiveKitCLIError(kind: .failed, message: error.localizedDescription) }
-        }
-        return []
+            guard let session = try await cli.session(id) else { throw LiveKitCLIError(kind: .notReady, message: "This session is not available yet. Try again after the call ends.") }
+            guard identity == projectIdentity, !Task.isCancelled else { return }
+            if !rows.contains(where: { $0.id == id }) { rows.insert(SessionRow(id: id, session: session), at: 0); if rows.count > 1000 { rows.removeLast() } }
+            section = .sessions; selection = id
+        } catch { if identity == projectIdentity { operations.error = error.localizedDescription } }
     }
 
-    private func loadRecordings(generation: UUID) async -> [EgressRecording] {
-        guard refreshGeneration == generation else { return [] }
-        do {
-            guard let client = try storageClient() else {
-                storageConfigured = false
-                storageError = nil
-                return []
-            }
-            storageConfigured = true
-            let objects = try await client.list(prefix: client.config.prefix)
-            guard refreshGeneration == generation else { return [] }
-            let sizes = Dictionary(objects.map { ($0.key, $0.size) }, uniquingKeysWith: { a, _ in a })
-            let newManifests = objects.filter { $0.key.hasSuffix(".json") && manifests[$0.key] == nil }
-            try await withThrowingTaskGroup(of: (String, EgressRecording?).self) { group in
-                for object in newManifests {
-                    group.addTask { (object.key, EgressRecording(manifest: try JSONValue.parse(try await client.object(object.key)))) }
+    func openSimulation(_ job: SimulationJob, run: SimulationRun, export: JSONValue?) {
+        detailTask?.cancel(); audioTask?.cancel(); analysisTask?.cancel(); selection = nil
+        let row = SessionRow(id: "simulation:\(projectIdentity):\(run.id):\(job.id)")
+        let review = SessionDetail(row: row); review.simulationJudge = job; review.dataState = "settled"
+        let history = export?["summary"]?.field("chatHistory")?[job.id]?["items"]?.array ?? []
+        review.transcript = history.enumerated().map { index, item in
+            var normalized: [String: JSONValue] = ["id": .string(item.text("id").isEmpty ? "simulation-item-\(index)" : item.text("id"))]
+            for key in ["message", "functionCall", "functionCallOutput", "agentHandoff", "agentConfigUpdate"] {
+                guard let value = item.field(key) else { continue }
+                var payload = value.object ?? [:]
+                if key == "message" {
+                    payload["text"] = .string((value["content"]?.array ?? []).compactMap { $0["text"]?.string ?? $0.string }.joined(separator: "\n"))
                 }
-                for try await (key, recording) in group {
-                    guard refreshGeneration == generation else { group.cancelAll(); throw CancellationError() }
-                    if let recording { manifests[key] = recording }
-                }
+                normalized[key] = .object(payload)
+                if let date = value.field("createdAt") { normalized["timestamp"] = date }
             }
-            guard refreshGeneration == generation else { return [] }
-            storageError = nil
-            return manifests.values.compactMap { recording in
-                guard let size = sizes[recording.audioKey] else { return nil }  // manifest without audio
-                var r = recording
-                r.size = size
-                return r
-            }
-        } catch {
-            guard refreshGeneration == generation else { return [] }
-            storageError = "Egress storage: \(error.localizedDescription)"
-            return manifests.values.map { $0 }
+            return TranscriptItem(json: .object(normalized), index: index)
         }
+        review.insights = SessionInsights(transcript: review.transcript, logs: [], spans: [])
+        detail = review; section = .sessions
     }
 
     private func openSelection() {
-        detailTask?.cancel()
+        detailTask?.cancel(); audioTask?.cancel(); analysisTask?.cancel()
         player.unload()
         if let previous = detail { noteFlags(of: previous) }
         guard let selection, let row = rows.first(where: { $0.id == selection }) else { detail = nil; return }
         let detail = SessionDetail(row: row)
         self.detail = detail
+        reloadAudio()
+        let identity = projectIdentity
         detailTask = Task {
-            async let a: Void = loadAudio(detail)
-            async let o: Void = loadObservability(detail)
-            _ = await (a, o)
+            detail.aiReview = try? await AIReviewStore.shared.load(project: identity, session: detail.row.id)
+            if let data = try? await AudioAIStore.shared.load(project: identity, session: detail.row.id, name: "transcription-comparison.json") {
+                let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+                detail.transcriptionComparisons = (try? decoder.decode([TranscriptionComparison].self, from: data)) ?? []
+            }
+            await loadObservability(detail)
         }
     }
 
@@ -481,7 +766,9 @@ final class AppModel {
     }
 
     private func loadObservability(_ detail: SessionDetail) async {
+        guard detail === self.detail, !Task.isCancelled else { return }
         guard let cli, detail.row.session != nil else {
+            detail.insights = SessionInsights(transcript: [], logs: [], spans: [])
             detail.observabilityError = detail.row.session == nil
                 ? LiveKitCLIError(kind: .failed, message: "LiveKit session data is unavailable. Local recordings and imported captures remain accessible.")
                 : liveKitError
@@ -489,50 +776,102 @@ final class AppModel {
         }
         detail.loadingObservability = true
         defer { detail.loadingObservability = false }
-        let id = detail.row.id
-        do {
-            async let transcript = cli.transcript(id)
-            async let logs = cli.logs(id)
-            async let spans = cli.traces(id)
-            async let metrics = cli.metrics(id)
-            async let room = cli.roomUsage(id)
-            let t = try await transcript
-            detail.transcript = t.items
-            detail.dataState = t.status
-            detail.logs = (try? await logs) ?? []
-            detail.spans = (try? await spans) ?? []
-            detail.metrics = (try? await metrics) ?? []
-            detail.room = (try? await room) ?? nil
-            detail.insights = SessionInsights(transcript: detail.transcript, logs: detail.logs, spans: detail.spans)
-            detail.applyLessonFlags()
-            lessonFlagCounts[id] = detail.flags.filter(\.isFromLesson).count
-            if detail.dataState == "settled" { saveLessonFlagCounts() }
-            detail.observabilityError = nil
-        } catch let error as LiveKitCLIError {
-            detail.observabilityError = error
-            if error.kind == .signedOut { liveKitError = error }
-        } catch {
-            detail.observabilityError = LiveKitCLIError(kind: .failed, message: error.localizedDescription)
+        let id = detail.row.id, identity = projectIdentity
+        let results = await SessionResources.load(source: cli, id: id)
+        guard detail === self.detail, identity == projectIdentity, !Task.isCancelled else { return }
+        for (kind, result) in results {
+            switch result {
+            case .success(let document):
+                let json = document.json
+                var readiness = document.readiness
+                if kind == .summary, readiness.state == .unknown, let session = LiveKitSession(json: json["session"] ?? json) {
+                    readiness.state = session.status == "active" ? .pending : .settled
+                }
+                detail.resourceStates[kind] = readiness
+                switch kind {
+                case .transcript: detail.transcript = json.items.enumerated().map { TranscriptItem(json: $1, index: $0) }; detail.dataState = readiness.state.rawValue
+                case .logs: detail.logs = json.items.enumerated().map { LogRecord(json: $1, index: $0) }
+                case .traces: detail.spans = json.items.enumerated().map { Span(json: $1, index: $0) }
+                case .metrics: detail.metrics = json.items.enumerated().map { MetricPoint(json: $1, index: $0) }
+                case .summary: detail.room = RoomUsage(json: json)
+                case .recording: break
+                }
+            case .failure(let error): detail.resourceStates[kind] = ResourceReadiness(error: error)
+            }
+            if let state = detail.resourceStates[kind] { try? await sessionStore.recordResource(project: identity, id: id, kind: kind, readiness: state) }
         }
+        guard detail === self.detail, identity == projectIdentity, !Task.isCancelled else { return }
+        detail.insights = SessionInsights(transcript: detail.transcript, logs: detail.logs, spans: detail.spans)
+        detail.applyLessonFlags()
+        let count = detail.flags.filter(\.isFromLesson).count
+        let name = detail.logs.lazy.compactMap { $0.attributes["lk.agent_name"]?.string }.first { !$0.isEmpty }
+        if detail.resourceStates[.logs]?.state == .settled { lessonFlagCounts[id] = count }
+        agentNames[id] = name
+        try? await sessionStore.enrich(project: identity, id: id, agent: name, lessonFlags: detail.resourceStates[.logs]?.state == .settled ? count : nil)
+        if detail.row.startedAt != nil {
+            let usage = CostUsageSnapshot.make(row: detail.row, documents: results, plan: plan, priceDate: pricing?.fetched)
+            try? await sessionStore.saveCostUsage(project: identity, id: id, usage: usage)
+        }
+        let failures = detail.resourceStates.values.compactMap(\.message)
+        detail.observabilityError = failures.isEmpty ? nil : LiveKitCLIError(kind: .failed, message: failures.joined(separator: "\n"))
     }
 
-    /// Downloads the egress recording and LiveKit's session recording together, then loads every channel of both
-    /// into the player. When there are both, LiveKit's is muted to start with, since it holds the same audio.
-    private func loadAudio(_ detail: SessionDetail) async {
+    /// Keep the selected review open when its egress manifest arrives after its summary.
+    @discardableResult func updateOpenRow(_ row: SessionRow) -> Task<Void, Never>? {
+        guard let detail, detail.row.id == row.id else { return nil }
+        let changed = detail.row.recording != row.recording
+        detail.row = row
+        guard changed else { return nil }
+        analysisTask?.cancel()
+        for source in detail.sources where source.kind == .egress { spectrogramCache.removeValue(forKey: source.file) }
+        detail.spectrograms.removeValue(forKey: .egress)
+        detail.spectrogramErrors.removeValue(forKey: .egress)
+        return reloadAudio()
+    }
+
+    @discardableResult func reloadAudio() -> Task<Void, Never>? {
+        guard let detail else { return nil }
+        let previous = audioTask
+        previous?.cancel()
+        let task = Task {
+            // Serialize replacement loads so cancelled downloads/decoders cannot overwrite new media.
+            await previous?.value
+            guard !Task.isCancelled, detail === self.detail else { return }
+            await loadAudio(detail)
+        }
+        audioTask = task
+        return task
+    }
+
+    /// Downloads both sources and loads their channels. LiveKit's duplicate audio starts muted.
+    func loadAudio(_ detail: SessionDetail) async {
+        guard detail === self.detail, !Task.isCancelled else { return }
         detail.loadingAudio = true
         defer { detail.loadingAudio = false }
+        let mediaProject = projectIdentity
+        detail.audioError = nil; detail.egressError = nil
+        if detail.row.recording == nil, let source = recordingSourceKey {
+            do {
+                let recording = try await sessionStore.recording(project: mediaProject, id: detail.row.id, source: source)
+                guard detail === self.detail, !Task.isCancelled else { return }
+                detail.row.recording = recording
+            } catch { detail.egressError = "Could not read the egress recording index: \(error.localizedDescription)" }
+        }
+        let filesToPin = [observabilityFile(detail.row.id)] + (detail.row.recording.map { [egressFile($0)] } ?? [])
+        await MediaCache.shared.pin(filesToPin, lease: detail.mediaLease)
         async let egress = egressSource(detail)
         async let observability = observabilitySource(detail)
         let found = await [egress, observability].compactMap { $0 }
         guard detail === self.detail, !Task.isCancelled else { return }
         detail.sources = found
+        detail.audioRevision += 1
         guard !found.isEmpty else {
             if detail.audioError == nil { detail.audioError = "No recording for this session." }
             return
         }
         var tracks: [PlaybackTrack] = []
         for source in found {
-            let files = await Task.detached(priority: .userInitiated) { try? PlaybackFile.channels(source.file) }.value ?? []
+            let files = (try? await MediaResources.compute(project: mediaProject) { try PlaybackFile.channels(source.file) }) ?? []
             guard detail === self.detail, !Task.isCancelled else { return }
             detail.channelFiles[source.kind] = files
             for (channel, file) in files.enumerated() {
@@ -543,49 +882,77 @@ final class AppModel {
         }
         if tracks.isEmpty, detail.audioError == nil { detail.audioError = "Could not decode the recordings." }
         let duplicate = found.count > 1 ? Set(tracks.map(\.id).filter { $0.kind == .observability }) : []
+        let moment = player.currentDate, wasPlaying = player.isPlaying
         player.load(tracks, muted: duplicate)
+        if let moment, let origin = player.origin { player.seek(to: moment.timeIntervalSince(origin)) }
+        if wasPlaying { player.play() }
+        try? await MediaCache.shared.prune(root: mediaCacheDirectory)
     }
 
     private func egressSource(_ detail: SessionDetail) async -> RecordingSource? {
         guard let recording = detail.row.recording else { return nil }
         do {
             let file = egressFile(recording)
-            if (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map({ Int64($0) }) != recording.size {
+            let cachedSize = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+            if cachedSize == nil || cachedSize == 0 || (recording.size > 0 && cachedSize != recording.size) {
                 guard let client = try storageClient() else { throw StorageError.message("Egress storage is not set up for this project.") }
-                try await client.download(recording.audioKey, to: file)
+                try await MediaResources.downloads.perform(project: projectIdentity) { try await client.download(recording.audioKey, to: file) }
             }
             return RecordingSource(kind: .egress, file: file, origin: recording.startedAt,
                                    userLeftAgentRight: AppSettings.storage(for: project).userLeftAgentRight)
-        } catch {
+        } catch is CancellationError { return nil }
+        catch {
             detail.audioError = "Could not download the egress recording: \(error.localizedDescription)"
+            detail.egressError = detail.audioError
             return nil
         }
     }
 
     /// Where an egress recording is cached once downloaded.
-    private func egressFile(_ recording: EgressRecording) -> URL {
-        AppSettings.cacheDirectory.appendingPathComponent("recordings")
-            .appendingPathComponent(AppSettings.key(for: project), isDirectory: true)
-            .appendingPathComponent(recording.audioKey.replacingOccurrences(of: "/", with: "_"))
+    func egressFile(_ recording: EgressRecording) -> URL {
+        let root = mediaCacheDirectory.appendingPathComponent("recordings")
+        let identity = AppSettings.key(for: project)
+        let name = recording.audioKey.replacingOccurrences(of: "/", with: "_")
+        let current = root.appendingPathComponent(identity, isDirectory: true).appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: current.path) { return current }
+        // The project-ID migration copied settings, but existing audio stayed under the old name.
+        let defaults = UserDefaults.standard
+        if let legacy = defaults.string(forKey: "storageSecretAlias." + identity),
+           defaults.string(forKey: "projectIdentity." + legacy) == identity,
+           let data = defaults.data(forKey: "storage." + legacy),
+           let old = try? JSONDecoder().decode(StorageSettings.self, from: data) {
+            let settings = AppSettings.storage(for: project)
+            let file = root.appendingPathComponent(legacy, isDirectory: true).appendingPathComponent(name)
+            if old.endpoint == settings.endpoint, old.region == settings.region, old.bucket == settings.bucket,
+               old.prefix == settings.prefix, FileManager.default.fileExists(atPath: file.path) { return file }
+        }
+        return current
     }
 
     /// Where LiveKit's session recording is cached once downloaded.
-    private static func observabilityFile(_ sessionId: String) -> URL {
-        AppSettings.cacheDirectory.appendingPathComponent("livekit").appendingPathComponent("\(sessionId).ogg")
+    private func observabilityFile(_ sessionId: String) -> URL {
+        mediaCacheDirectory.appendingPathComponent("livekit").appendingPathComponent("\(sessionId).ogg")
     }
 
     /// LiveKit's session recording, downloaded because its link expires and the spectrogram needs the file.
     private func observabilitySource(_ detail: SessionDetail) async -> RecordingSource? {
         guard detail.row.session != nil, let cli else { return nil }
-        let file = Self.observabilityFile(detail.row.id)
+        let identity = projectIdentity
+        let file = observabilityFile(detail.row.id)
         let marker = file.appendingPathExtension("json")
         // A settled recording never changes, so reuse it with its saved start time.
         if let saved = try? JSONValue.parse(Data(contentsOf: marker)), FileManager.default.fileExists(atPath: file.path) {
+            detail.resourceStates[.recording] = ResourceReadiness(state: .settled)
             return RecordingSource(kind: .observability, file: file, origin: saved["startedAt"]?.date)
         }
         do {
-            guard let recording = try await cli.recording(detail.row.id) else { return nil }
-            let (download, response) = try await URLSession.shared.download(from: recording.url)
+            let document = try await cli.resource(detail.row.id, kind: .recording)
+            let state = document.readiness
+            detail.resourceStates[.recording] = state
+            try? await sessionStore.recordResource(project: identity, id: detail.row.id, kind: .recording, readiness: state)
+            guard let link = document.json["url"]?.string, let url = URL(string: link), ["https", "http"].contains(url.scheme) else { return nil }
+            let recording = (url: url, startedAt: document.json["recordingStartedAt"]?.date, settled: state.state == .settled)
+            let (download, response) = try await MediaResources.downloads.perform(project: projectIdentity) { try await URLSession.shared.download(from: recording.url) }
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? FileManager.default.removeItem(at: file)
@@ -596,24 +963,43 @@ final class AppModel {
             }
             return RecordingSource(kind: .observability, file: file, origin: recording.startedAt)
         } catch {
+            let state = ResourceReadiness(error: error)
+            detail.resourceStates[.recording] = state
+            try? await sessionStore.recordResource(project: identity, id: detail.row.id, kind: .recording, readiness: state)
             return nil
         }
     }
 
     /// Computes a spectrogram for each recording of the session that does not have one yet.
     func analyze(_ detail: SessionDetail) async {
+        let previous = analysisTask
+        previous?.cancel()
+        let task = Task {
+            // A new source can arrive while SwiftUI cancels the preceding analysis task.
+            // Let it clear its in-flight markers before deciding which lanes still need work.
+            await previous?.value
+            guard detail === self.detail, !Task.isCancelled else { return }
+            await computeSpectrograms(detail)
+        }
+        analysisTask = task
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+    }
+
+    private func computeSpectrograms(_ detail: SessionDetail) async {
+        let mediaProject = projectIdentity
         await withTaskGroup(of: Void.self) { group in
             for source in detail.sources where detail.spectrograms[source.kind] == nil && !detail.analyzing.contains(source.kind) {
                 if let cached = spectrogramCache[source.file] { detail.spectrograms[source.kind] = cached; continue }
                 detail.analyzing.insert(source.kind)
                 group.addTask { @MainActor in
                     defer { detail.analyzing.remove(source.kind) }
-                    let work = Task.detached(priority: .userInitiated) { try Spectrogram.compute(file: source.file) }
                     do {
-                        let spectrogram = try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
+                        let spectrogram = try await MediaResources.compute(project: mediaProject) { try Spectrogram.compute(file: source.file) }
+                        try Task.checkCancellation()
+                        guard detail === self.detail else { return }
                         detail.spectrograms[source.kind] = spectrogram
-                        if self.spectrogramCache.count >= 6 { self.spectrogramCache.removeAll() }
-                        self.spectrogramCache[source.file] = spectrogram
+                        if self.spectrogramCache.count >= 6 || self.spectrogramCache.values.reduce(0, { $0 + $1.byteCount }) + spectrogram.byteCount > 64 * 1024 * 1024 { self.spectrogramCache.removeAll() }
+                        if spectrogram.byteCount <= 64 * 1024 * 1024 { self.spectrogramCache[source.file] = spectrogram }
                     } catch is CancellationError {
                     } catch {
                         detail.spectrogramErrors[source.kind] = "Could not analyze the \(source.title.lowercased()) recording: \(error.localizedDescription)"
@@ -697,6 +1083,7 @@ final class AppModel {
         guard spaceMonitor == nil else { return }
         spaceMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.keyCode == 49,
+                  WindowContext.shared.active === self,
                   event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
                   let window = event.window, window.attachedSheet == nil,
                   !(window.firstResponder is NSText),  // a text field or the note being typed
@@ -717,6 +1104,7 @@ final class AppModel {
     func toggleSessionFlag(_ id: String) {
         if flaggedSessions.remove(id) == nil { flaggedSessions.insert(id) }
         UserDefaults.standard.set(flaggedSessions.sorted(), forKey: Self.flaggedSessionsKey)
+        projectFlagsChanged(id)
     }
 
     /// Whether a session has flags with notes; the open session is read live so the list updates as you flag.
@@ -725,8 +1113,20 @@ final class AppModel {
         return sessionsWithNotes.contains(id)
     }
 
-    private func noteFlags(of detail: SessionDetail) {
+    func noteFlags(of detail: SessionDetail) {
+        guard detail === self.detail else { return }
         if detail.flags.allSatisfy(\.isFromLesson) { sessionsWithNotes.remove(detail.row.id) } else { sessionsWithNotes.insert(detail.row.id) }
+        projectFlagsChanged(detail.row.id)
+    }
+
+    private func projectFlagsChanged(_ id: String) {
+        let project = projectIdentity, flagged = isFlagged(id), noted = sessionsWithNotes.contains(id)
+        let reference = rows.first(where: { $0.id == id }).flatMap { captureSession(for: $0) }.map { AnnotationReference(project: project, session: $0, flagged: flagged, noted: noted) }
+        Task {
+            if let reference { try? await AnnotationStore.shared.save(reference) }
+            try? await sessionStore.setFlags(project: project, id: id, flagged: flagged, noted: noted)
+            if project == projectIdentity, onlyFlagged { scheduleCachedQuery() }
+        }
     }
 
     private static func loadSessionsWithNotes() -> Set<String> {
@@ -762,8 +1162,9 @@ final class AppModel {
         guard !savingSessions.contains(row.id) else { return }
         // Freeze all project-sensitive inputs before presenting the panel or awaiting I/O.
         let exportCLI = cli
+        let exportProject = projectIdentity
         let exportCaptures = captures.captures(for: captureSession(for: row))
-        let recordings: [(source: URL, name: String)] = [(Self.observabilityFile(row.id), "livekit-recording.ogg")]
+        let recordings: [(source: URL, name: String)] = [(observabilityFile(row.id), "livekit-recording.ogg")]
             + (row.recording.map { recording in
                 let file = egressFile(recording)
                 return [(file, "egress-recording." + (file.pathExtension.isEmpty ? "audio" : file.pathExtension))]
@@ -789,6 +1190,13 @@ final class AppModel {
         Task {
             defer { savingSessions.remove(row.id) }
             do {
+                if let review = try await AIReviewStore.shared.load(project: exportProject, session: row.id) {
+                    let directory = folder.appendingPathComponent("ai", isDirectory: true)
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+                    try encoder.encode(review).write(to: directory.appendingPathComponent("review.json"), options: .atomic)
+                }
+                try await AudioAIStore.shared.export(project: exportProject, session: row.id, to: folder.appendingPathComponent("ai/audio", isDirectory: true))
                 let skipped = try await writeSessionData(row, to: folder, exportCLI: exportCLI, recordings: recordings,
                                                         flags: flags, report: report, packetCaptures: selectedCaptures)
                 UserDefaults.standard.set(folder.path, forKey: Self.savedFolderKey(row.id))

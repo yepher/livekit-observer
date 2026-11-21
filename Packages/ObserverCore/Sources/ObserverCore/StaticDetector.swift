@@ -1,35 +1,41 @@
 import Foundation
 
 /// Per-column measures of one channel, for finding static. Filled in by `Spectrogram.compute`.
-struct NoiseTrack: Sendable {
+public struct NoiseTrack: Sendable {
     /// Energy below this counts toward `lowShare`.
-    static let lowShareHz: Float = 2_500
+    public static let lowShareHz: Float = 2_500
 
     /// Loudness in dBFS.
-    var level: [Float] = []
+    public var level: [Float] = []
     /// Cepstral peak prominence: high for a voice's harmonics, low for noise.
-    var harmonicity: [Float] = []
+    public var harmonicity: [Float] = []
     /// Share of the energy below `lowShareHz`.
-    var lowShare: [Float] = []
+    public var lowShare: [Float] = []
+
+    public init(level: [Float] = [], harmonicity: [Float] = [], lowShare: [Float] = []) { self.level = level; self.harmonicity = harmonicity; self.lowShare = lowShare }
 }
 
 /// One line the agent asked TTS to speak, and when its audio should be playing.
-struct TTSLine: Hashable, Sendable {
-    let start: Date
-    let end: Date
-    let text: String
+public struct TTSLine: Hashable, Sendable {
+    public let start: Date
+    public let end: Date
+    public let text: String
+
+    public init(start: Date, end: Date, text: String) { self.start = start; self.end = end; self.text = text }
 }
 
 /// A stretch of a TTS line's audio that sounds like static rather than speech.
-struct TTSStatic: Identifiable, Hashable, Sendable {
-    var id: Date { start }
-    let start: Date
-    let end: Date
+public struct TTSStatic: Identifiable, Hashable, Sendable {
+    public var id: Date { start }
+    public let start: Date
+    public let end: Date
     /// The line being spoken.
-    let text: String
+    public let text: String
     /// Average loudness of the stretch, in dBFS.
-    let level: Float
-    var duration: TimeInterval { end.timeIntervalSince(start) }
+    public let level: Float
+    public var duration: TimeInterval { end.timeIntervalSince(start) }
+
+    public init(start: Date, end: Date, text: String, level: Float) { self.start = start; self.end = end; self.text = text; self.level = level }
 }
 
 /// Finds static in the agent's TTS audio: stretches at least `minimumRun` long where the sound is audible,
@@ -39,25 +45,25 @@ struct TTSStatic: Identifiable, Hashable, Sendable {
 /// recording (the learner, played-back clips) don't count.
 ///
 /// Tuned on LiveKit Cloud recordings of `cartesia/sonic-3` producing static for short lines.
-enum StaticDetector {
-    static let minimumLevel: Float = -55
+public enum StaticDetector {
+    public static let minimumLevel: Float = -55
     /// A column with harmonics below this may be static…
-    static let maximumHarmonicity: Float = 0.08
+    public static let maximumHarmonicity: Float = 0.08
     /// …and a stretch counts only when its median is below this. Static sits near 0.04; speech, even where single
     /// columns dip under `maximumHarmonicity`, has a median well above.
-    static let maximumMedianHarmonicity: Float = 0.06
-    static let minimumLowShare: Float = 0.6
+    public static let maximumMedianHarmonicity: Float = 0.06
+    public static let minimumLowShare: Float = 0.6
     /// Largest standard deviation of the level, in dB, over `steadyWindow`.
-    static let maximumLevelSpread: Float = 3
-    static let steadyWindow: TimeInterval = 0.4
+    public static let maximumLevelSpread: Float = 3
+    public static let steadyWindow: TimeInterval = 0.4
     /// Gaps this short inside static, where a column happens to look otherwise, are bridged.
-    static let bridgedGap: TimeInterval = 0.2
-    static let minimumRun: TimeInterval = 0.4
+    public static let bridgedGap: TimeInterval = 0.2
+    public static let minimumRun: TimeInterval = 0.4
 
     /// - Parameters:
     ///   - track: the agent channel's measures, one per `hop` seconds from `origin`.
     ///   - lines: TTS lines; each is checked only between its start and end.
-    static func find(in track: NoiseTrack, hop: TimeInterval, origin: Date, lines: [TTSLine]) -> [TTSStatic] {
+    public static func find(in track: NoiseTrack, hop: TimeInterval, origin: Date, lines: [TTSLine]) -> [TTSStatic] {
         let count = min(track.level.count, track.harmonicity.count, track.lowShare.count)
         guard count > 0, hop > 0 else { return [] }
         let candidate = candidates(track, count: count, hop: hop)

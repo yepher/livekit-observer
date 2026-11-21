@@ -1,4 +1,5 @@
 import Foundation
+import ObserverCore
 
 @main struct AnalysisBenchmark {
     static func main() throws {

@@ -1,3 +1,4 @@
+import ObserverCore
 import AVFoundation
 import Observation
 
@@ -376,12 +377,14 @@ enum PlaybackFile {
             AVNumberOfChannelsKey: 1, AVEncoderBitDepthHintKey: 16,
         ]
         let partials = (0..<count).map { file(url, channel: $0).appendingPathExtension("partial") }
+        defer { for partial in partials { try? FileManager.default.removeItem(at: partial) } }
         for partial in partials { try? FileManager.default.removeItem(at: partial) }
         // Energy of each channel's difference from channel 0, against channel 0's, as the spectrogram measures it.
         var difference: Float = 0, signal: Float = 0
         do {
             let outputs = try partials.map { try AVAudioFile(forWriting: $0, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false) }
             while input.framePosition < input.length {
+                try Task.checkCancellation()
                 try input.read(into: buffer)
                 let n = Int(buffer.frameLength)
                 guard n > 0, let data = buffer.floatChannelData, let target = out.floatChannelData else { break }

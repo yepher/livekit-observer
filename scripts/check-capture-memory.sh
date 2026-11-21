@@ -6,7 +6,14 @@ capture_repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 capture_benchmark_dir=$(mktemp -d "${TMPDIR:-/tmp}/observer-capture-benchmark.XXXXXX")
 trap 'rm -rf "$capture_benchmark_dir"' EXIT HUP INT TERM
 
-xcrun swiftc -parse-as-library -O -module-cache-path "$capture_benchmark_dir/modules" \
+swift build --package-path "${capture_repo}/Packages/ObserverCore" -c release
+capture_core=$(swift build --package-path "${capture_repo}/Packages/ObserverCore" -c release --show-bin-path)
+if [ -f "${capture_core}/libObserverCore.a" ]; then
+    set -- "${capture_core}/libObserverCore.a"
+else
+    set -- "${capture_core}"/ObserverCore.build/*.o
+fi
+xcrun swiftc -parse-as-library -O -target "$(uname -m)-apple-macosx15.0" -I "${capture_core}" -I "${capture_core}/Modules" "$@" -lsqlite3 -module-cache-path "$capture_benchmark_dir/modules" \
     "$capture_repo/Sources/LiveKitObserver/PacketCapture.swift" \
     "$capture_repo/Tests/Performance/CaptureBenchmark.swift" \
     -o "$capture_benchmark_dir/check"

@@ -6,7 +6,9 @@
 # storage secret. Without one it signs ad hoc, and macOS asks for the secret again after each rebuild.
 set -eu
 cd "$(dirname "$0")"
-xcodegen generate --quiet
+# Leave the open Xcode project's package graph intact when the spec and source list
+# have not changed. Regenerating on every build can leave Xcode with stale packages.
+xcodegen generate --use-cache --quiet
 
 identity="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development/ { print $2; exit }')}"
 signing=""
@@ -25,11 +27,14 @@ build() {
   old_ifs="$IFS"; IFS='
 '
   # shellcheck disable=SC2086
-  xcodebuild -project LiveKitObserver.xcodeproj -scheme LiveKitObserver -derivedDataPath build/DerivedData "$@" $signing -quiet
+  xcodebuild -project LiveKitObserver.xcodeproj -scheme LiveKitObserver -derivedDataPath build/DerivedData "$@" CODE_SIGN_STYLE=Manual $signing -quiet
   IFS="$old_ifs"
 }
 
-if [ "${1:-}" = "--test" ]; then build test; fi
+if [ "${1:-}" = "--test" ]; then
+  swift test --package-path Packages/ObserverCore
+  build test
+fi
 build -configuration Release build
 rm -rf "build/LiveKit Observer.app"
 cp -R "build/DerivedData/Build/Products/Release/LiveKit Observer.app" build/

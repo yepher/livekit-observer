@@ -1,12 +1,6 @@
+import ObserverCore
 import AppKit
 import Foundation
-
-struct LiveKitCLIError: LocalizedError, Sendable {
-    enum Kind: Sendable { case signedOut, notReady, observabilityOff, missingCLI, projectNotFound, failed }
-    let kind: Kind
-    let message: String
-    var errorDescription: String? { message }
-}
 
 /// A project saved in the `lk` CLI (`lk project list`).
 struct LKProject: Identifiable, Hashable, Sendable {
@@ -40,6 +34,7 @@ struct LiveKitCLI: Sendable {
     let executable: URL
     /// The `lk` project to use, by name; nil uses `lk`'s default project.
     let project: String?
+    var priority: WorkScheduler.Priority = .interactive
 
     static func locate(override: String = "") -> URL? {
         let candidates = [override, "/opt/homebrew/bin/lk", "/usr/local/bin/lk", NSHomeDirectory() + "/go/bin/lk"]
@@ -54,11 +49,37 @@ struct LiveKitCLI: Sendable {
         return folder
     }
 
-    /// The projects saved in `lk`.
-    func projects() async throws -> [LKProject] {
-        let result = try await Self.execute(executable, ["project", "list", "--json"], in: Self.workingDirectory)
-        guard result.status == 0 else { throw LiveKitCLIError(kind: .failed, message: Self.message(result)) }
-        return LKProject.list(from: try JSONValue.parse(result.stdout))
+    /// Cloud metadata never contains API secrets; saved metadata is decoded with an allowlist.
+    func projects() async throws -> [ProjectRef] {
+        let local = try SavedProjects.read()
+        let result = try await Self.execute(executable, ["project", "list", "--user-auth", "--json"], in: Self.workingDirectory)
+        guard result.status == 0 else {
+            if !local.isEmpty { return local }
+            throw LiveKitCLIError(kind: .failed, message: Self.message(result))
+        }
+        var projects = ProjectRef.merged(local: local, cloud: try JSONValue.parse(result.stdout))
+        if let user = await signedInUser() {
+            let memberships = await ProjectDirectory.shared.memberships(cli: self, user: user)
+            let byProject = Dictionary(memberships.map { ($0.projectID, $0) }, uniquingKeysWith: { first, _ in first })
+            for index in projects.indices {
+                if let member = byProject[projects[index].id] {
+                    projects[index].workspaceID = member.workspaceID
+                    projects[index].workspaceName = member.workspaceName
+                }
+            }
+        }
+        return projects
+    }
+
+    func version() async throws -> CLIVersion {
+        let result = try await Self.execute(executable, ["--version"], in: Self.workingDirectory)
+        guard result.status == 0, let version = CLIVersion(String(decoding: result.stdout, as: UTF8.self)) else {
+            throw LiveKitCLIError(kind: .tooOld, message: "Could not determine the CLI version. Observer requires lk 2.19.4 or later.")
+        }
+        guard version >= .minimum else {
+            throw LiveKitCLIError(kind: .tooOld, message: "Observer requires lk 2.19.4 or later; installed: \(version). Update livekit-cli with Homebrew.")
+        }
+        return version
     }
 
     /// Saves a project in `lk` from its URL, API key, and secret.
@@ -95,8 +116,13 @@ struct LiveKitCLI: Sendable {
         URL(string: "https://cloud.livekit.io/projects/\(project)/sessions/\(session)")
     }
 
-    func sessions(since days: Int = 30, limit: Int = 200) async throws -> [LiveKitSession] {
-        try await analytics(["session", "list", "--since", "\(days)d", "--limit", "\(limit)"]).items.compactMap(LiveKitSession.init(json:))
+    func sessionPage(query: SessionQuery, cursor: String? = nil) async throws -> SessionPage {
+        try await SessionPage(json: analytics(query.arguments(cursor: cursor)))
+    }
+
+    func session(_ id: String) async throws -> LiveKitSession? {
+        let json = try await analytics(["session", "get", id])
+        return LiveKitSession(json: json["session"] ?? json)
     }
 
     /// The dispatch name of the agent that ran the session, read from its first log record.
@@ -184,7 +210,7 @@ struct LiveKitCLI: Sendable {
         return pretty
     }
 
-    private func analytics(_ args: [String]) async throws -> JSONValue {
+    func analytics(_ args: [String]) async throws -> JSONValue {
         let data = try await analyticsData(args)
         do { return try JSONValue.parse(data) }
         catch { throw LiveKitCLIError(kind: .failed, message: "lk returned output that is not JSON.") }
@@ -192,7 +218,7 @@ struct LiveKitCLI: Sendable {
 
     private func analyticsData(_ args: [String]) async throws -> Data {
         let selection = project.map { ["--project", $0] } ?? []
-        let result = try await Self.execute(executable, selection + ["analytics"] + args + ["--json", "--user-auth"], in: Self.workingDirectory)
+        let result = try await Self.execute(executable, selection + ["analytics"] + args + ["--json", "--user-auth"], in: Self.workingDirectory, priority: priority)
         let stderr = String(decoding: result.stderr, as: UTF8.self)
         if result.status == 75 { throw LiveKitCLIError(kind: .notReady, message: "LiveKit is still preparing this data. Try again in a minute.") }
         if stderr.localizedCaseInsensitiveContains("no user is signed in") || stderr.localizedCaseInsensitiveContains("not signed in") {
@@ -200,6 +226,9 @@ struct LiveKitCLI: Sendable {
         }
         if stderr.contains("ObservabilityDisabled") {
             throw LiveKitCLIError(kind: .observabilityOff, message: "Agent observability (user data recording) is off for this LiveKit project, so there is no transcript, log, or trace data.")
+        }
+        if stderr.localizedCaseInsensitiveContains("permission denied") || stderr.contains("403") || stderr.contains("PERMISSION_DENIED") {
+            throw LiveKitCLIError(kind: .forbidden, message: "The signed-in user does not have permission for this project data. Session observability requires an Admin role.")
         }
         if stderr.localizedCaseInsensitiveContains("project not found") {
             throw LiveKitCLIError(kind: .projectNotFound, message: "The signed-in LiveKit user cannot open project \(project.map { "“\($0)”" } ?? "(lk default)"). Sign in as a member of that project, or pick another.")
@@ -210,37 +239,38 @@ struct LiveKitCLI: Sendable {
 
     struct Output: Sendable { let status: Int32; let stdout: Data; let stderr: Data }
 
-    static func execute(_ executable: URL, _ arguments: [String], in directory: URL) async throws -> Output {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = executable
-                process.arguments = arguments
-                process.currentDirectoryURL = directory
-                var environment = ProcessInfo.processInfo.environment
-                environment["LK_NO_SKILLS_PROMPT"] = "1"
-                environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-                process.environment = environment
-                let out = Pipe(), err = Pipe()
-                process.standardOutput = out
-                process.standardError = err
-                process.standardInput = FileHandle.nullDevice
-                do { try process.run() } catch {
-                    continuation.resume(throwing: LiveKitCLIError(kind: .missingCLI, message: "Could not run lk: \(error.localizedDescription)"))
-                    return
-                }
-                // Drain both pipes concurrently so a large output cannot block the child.
-                let box = DataBox()
-                let group = DispatchGroup()
-                group.enter()
-                DispatchQueue.global().async { box.data = err.fileHandleForReading.readDataToEndOfFile(); group.leave() }
-                let stdout = out.fileHandleForReading.readDataToEndOfFile()
-                group.wait()
-                process.waitUntilExit()
-                continuation.resume(returning: Output(status: process.terminationStatus, stdout: stdout, stderr: box.data))
-            }
+    static func execute(_ executable: URL, _ arguments: [String], in directory: URL,
+                        environment: [String: String] = [:], priority: WorkScheduler.Priority = .interactive,
+                        timeout: TimeInterval = 60) async throws -> Output {
+        let project = arguments.firstIndex(of: "--project").flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil } ?? "account"
+        let read = isReadOnly(arguments)
+        return try await CommandBroker.shared.run(.init(executable: executable, arguments: arguments, directory: directory,
+                                                         environment: environment, timeout: timeout, nonce: read ? nil : UUID()),
+                                                   project: project, priority: priority)
+    }
+
+    static func isReadOnly(_ arguments: [String]) -> Bool {
+        // Strip global options with values before interpreting the command path. Resource IDs
+        // that happen to say "list" must never turn a mutation into a retried request.
+        var index = 0
+        let valued: Set<String> = ["--project", "--user", "--config", "--url", "--api-key", "--api-secret", "--subdomain"]
+        while index < arguments.count, arguments[index].hasPrefix("--"), arguments[index] != "--version" {
+            index += valued.contains(arguments[index]) ? 2 : 1
+        }
+        let command = Array(arguments.dropFirst(index))
+        guard let first = command.first else { return false }
+        if first == "--version" || first == "analytics" { return true }
+        guard command.count > 1 else { return false }
+        switch first {
+        case "cloud": return command[1] == "whoami"
+        case "project", "workspace": return command[1] == "list"
+        case "agent":
+            if command[1] == "simulate" { return command.count > 2 && ["list", "get", "export"].contains(command[2]) }
+            return ["list", "status", "versions", "secrets"].contains(command[1])
+        case "room":
+            if command[1] == "participants" { return command.count > 2 && ["list", "get"].contains(command[2]) }
+            return command[1] == "list"
+        default: return false
         }
     }
 }
-
-private final class DataBox: @unchecked Sendable { var data = Data() }

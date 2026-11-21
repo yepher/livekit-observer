@@ -1,3 +1,4 @@
+import ObserverCore
 import Accelerate
 import AVFoundation
 import CoreGraphics
@@ -22,6 +23,7 @@ struct Spectrogram: Sendable {
     let identicalChannels: Bool
     /// Per channel, the measures StaticDetector uses, one value per column.
     let noise: [NoiseTrack]
+    var byteCount: Int { channels.reduce(0) { $0 + $1.count } + noise.reduce(0) { $0 + ($1.level.count + $1.harmonicity.count + $1.lowShare.count) * MemoryLayout<Float>.stride } }
     var duration: TimeInterval { Double(frameCount) * hop }
 
     init(hop: TimeInterval, channels: [[UInt8]], frameCount: Int, identicalChannels: Bool, noise: [NoiseTrack] = []) {

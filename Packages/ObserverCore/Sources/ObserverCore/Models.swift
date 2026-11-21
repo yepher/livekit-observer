@@ -1,21 +1,21 @@
 import Foundation
 
 /// A LiveKit Cloud session (one room). The session ID is the room SID, `RM_…`.
-struct LiveKitSession: Identifiable, Hashable, Sendable {
-    let id: String
-    let roomName: String
-    let status: String
-    let startedAt: Date?
-    let endedAt: Date?
-    let participants: Int?
-    let hasDetailData: Bool
+public struct LiveKitSession: Identifiable, Hashable, Codable, Sendable {
+    public let id: String
+    public let roomName: String
+    public let status: String
+    public let startedAt: Date?
+    public let endedAt: Date?
+    public let participants: Int?
+    public let hasDetailData: Bool
     /// Tags the agent added to the session, such as `flagged:learner`.
-    let tags: [String]
+    public let tags: [String]
 
     /// Whether someone flagged a moment from the lesson page; the agent tags such sessions when they end.
-    var flaggedInLesson: Bool { tags.contains(Flag.lessonTag) }
+    public var flaggedInLesson: Bool { tags.contains(Flag.lessonTag) }
 
-    init?(json: JSONValue) {
+    public init?(json: JSONValue) {
         guard let id = json["sessionId"]?.string ?? json["session_id"]?.string ?? json["id"]?.string else { return nil }
         self.id = id
         roomName = json["roomName"]?.string ?? json["room_name"]?.string ?? ""
@@ -29,16 +29,16 @@ struct LiveKitSession: Identifiable, Hashable, Sendable {
 }
 
 /// One egress recording in Spaces, described by the manifest LiveKit writes next to it.
-struct EgressRecording: Hashable, Sendable {
-    let egressId: String
-    let roomId: String
-    let roomName: String
-    let startedAt: Date?
-    let endedAt: Date?
-    let audioKey: String
-    var size: Int64 = 0
+public struct EgressRecording: Hashable, Codable, Sendable {
+    public let egressId: String
+    public let roomId: String
+    public let roomName: String
+    public let startedAt: Date?
+    public let endedAt: Date?
+    public let audioKey: String
+    public var size: Int64 = 0
 
-    init?(manifest: JSONValue) {
+    public init?(manifest: JSONValue) {
         guard let roomId = manifest["room_id"]?.string,
               let key = manifest["files"]?.array?.compactMap({ $0["filename"]?.string }).first(where: { $0.hasSuffix(".ogg") })
         else { return nil }
@@ -54,24 +54,24 @@ struct EgressRecording: Hashable, Sendable {
 }
 
 /// A row in the session list: what LiveKit knows, the recording, or both.
-struct SessionRow: Identifiable, Hashable, Sendable {
-    let id: String
-    var session: LiveKitSession?
-    var recording: EgressRecording?
+public struct SessionRow: Identifiable, Hashable, Codable, Sendable {
+    public let id: String
+    public var session: LiveKitSession?
+    public var recording: EgressRecording?
     /// Minimal durable context for a session with manually imported captures.
-    var localCaptureSession: CaptureSession?
+    public var localCaptureSession: CaptureSession?
 
-    var roomName: String { session?.roomName ?? recording?.roomName ?? localCaptureSession?.roomName ?? "" }
-    var startedAt: Date? { session?.startedAt ?? recording?.startedAt ?? localCaptureSession?.startedAt }
-    var endedAt: Date? { session?.endedAt ?? recording?.endedAt ?? localCaptureSession?.endedAt }
-    var duration: TimeInterval? {
+    public var roomName: String { session?.roomName ?? recording?.roomName ?? localCaptureSession?.roomName ?? "" }
+    public var startedAt: Date? { session?.startedAt ?? recording?.startedAt ?? localCaptureSession?.startedAt }
+    public var endedAt: Date? { session?.endedAt ?? recording?.endedAt ?? localCaptureSession?.endedAt }
+    public var duration: TimeInterval? {
         guard let s = startedAt, let e = endedAt, e > s else { return nil }
         return e.timeIntervalSince(s)
     }
     /// What to call the session in lists and titles: its room name, or its ID when the room is unknown.
-    var title: String { roomName.isEmpty ? id : roomName }
+    public var title: String { roomName.isEmpty ? id : roomName }
 
-    static func merge(sessions: [LiveKitSession], recordings: [EgressRecording]) -> [SessionRow] {
+    public static func merge(sessions: [LiveKitSession], recordings: [EgressRecording]) -> [SessionRow] {
         var rows: [String: SessionRow] = [:]
         for s in sessions { rows[s.id] = SessionRow(id: s.id, session: s) }
         for r in recordings {
@@ -81,31 +81,33 @@ struct SessionRow: Identifiable, Hashable, Sendable {
         }
         return rows.values.sorted { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
     }
+
+    public init(id: String, session: LiveKitSession? = nil, recording: EgressRecording? = nil, localCaptureSession: CaptureSession? = nil) { self.id = id; self.session = session; self.recording = recording; self.localCaptureSession = localCaptureSession }
 }
 
-enum Role: String, Sendable { case user, agent, system, other }
+public enum Role: String, Sendable { case user, agent, system, other }
 
 /// A transcript item: a message, tool call, tool result, handoff, or config change.
-struct TranscriptItem: Identifiable, Hashable, Sendable {
-    let id: String
-    let timestamp: Date?
-    let kind: String
-    let role: Role
-    let text: String
-    let interrupted: Bool
-    let startedSpeakingAt: Date?
-    let stoppedSpeakingAt: Date?
-    let confidence: Double?
+public struct TranscriptItem: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let timestamp: Date?
+    public let kind: String
+    public let role: Role
+    public let text: String
+    public let interrupted: Bool
+    public let startedSpeakingAt: Date?
+    public let stoppedSpeakingAt: Date?
+    public let confidence: Double?
     /// Agent turn timings and user turn delays, in milliseconds, as reported.
-    let e2eLatencyMs: Double?
-    let llmTtftMs: Double?
-    let ttsTtfbMs: Double?
-    let transcriptionDelayMs: Double?
-    let endOfTurnDelayMs: Double?
+    public let e2eLatencyMs: Double?
+    public let llmTtftMs: Double?
+    public let ttsTtfbMs: Double?
+    public let transcriptionDelayMs: Double?
+    public let endOfTurnDelayMs: Double?
 
-    var start: Date? { startedSpeakingAt ?? timestamp }
+    public var start: Date? { startedSpeakingAt ?? timestamp }
 
-    init(json: JSONValue, index: Int) {
+    public init(json: JSONValue, index: Int) {
         id = json["id"]?.string ?? "item-\(index)"
         timestamp = json["timestamp"]?.date
         let payloadKey = json.object?.keys.sorted().first { !["id", "timestamp"].contains($0) } ?? "message"
@@ -134,12 +136,12 @@ struct TranscriptItem: Identifiable, Hashable, Sendable {
     }
 }
 
-enum LogLevel: Int, Comparable, CaseIterable, Sendable {
+public enum LogLevel: Int, Comparable, CaseIterable, Sendable {
     case trace, debug, info, warn, error, fatal
-    static func < (a: LogLevel, b: LogLevel) -> Bool { a.rawValue < b.rawValue }
-    var label: String { ["Trace", "Debug", "Info", "Warn", "Error", "Fatal"][rawValue] }
+    public static func < (a: LogLevel, b: LogLevel) -> Bool { a.rawValue < b.rawValue }
+    public var label: String { ["Trace", "Debug", "Info", "Warn", "Error", "Fatal"][rawValue] }
 
-    init(text: String) {
+    public init(text: String) {
         let t = text.uppercased()
         if t.contains("FATAL") || t.contains("CRITICAL") { self = .fatal }
         else if t.contains("ERROR") { self = .error }
@@ -150,15 +152,15 @@ enum LogLevel: Int, Comparable, CaseIterable, Sendable {
     }
 }
 
-struct LogRecord: Identifiable, Hashable, Sendable {
-    let id: String
-    let timestamp: Date?
-    let level: LogLevel
-    let logger: String
-    let message: String
-    let attributes: [String: JSONValue]
+public struct LogRecord: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let timestamp: Date?
+    public let level: LogLevel
+    public let logger: String
+    public let message: String
+    public let attributes: [String: JSONValue]
 
-    init(json: JSONValue, index: Int) {
+    public init(json: JSONValue, index: Int) {
         id = json["id"]?.string ?? "log-\(index)"
         timestamp = json["timestamp"]?.date
         level = LogLevel(text: json["level"]?.string ?? json["severityText"]?.string ?? "")
@@ -168,19 +170,19 @@ struct LogRecord: Identifiable, Hashable, Sendable {
     }
 }
 
-struct Span: Identifiable, Hashable, Sendable {
-    let id: String
-    let parentId: String?
-    let name: String
-    let start: Date?
-    let end: Date?
-    let failed: Bool
-    let statusMessage: String
-    let attributes: [String: JSONValue]
+public struct Span: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let parentId: String?
+    public let name: String
+    public let start: Date?
+    public let end: Date?
+    public let failed: Bool
+    public let statusMessage: String
+    public let attributes: [String: JSONValue]
 
-    var duration: TimeInterval? { start.flatMap { s in end.map { $0.timeIntervalSince(s) } } }
+    public var duration: TimeInterval? { start.flatMap { s in end.map { $0.timeIntervalSince(s) } } }
 
-    init(json: JSONValue, index: Int) {
+    public init(json: JSONValue, index: Int) {
         id = json["spanId"]?.string ?? "span-\(index)"
         let parent = json["parentSpanId"]?.string ?? ""
         parentId = parent.isEmpty ? nil : parent
@@ -193,7 +195,7 @@ struct Span: Identifiable, Hashable, Sendable {
     }
 }
 
-extension Span {
+public extension Span {
     /// Time allowed after a TTS line's audio should have finished, for playout delay.
     static let ttsPlayoutSlack: TimeInterval = 0.3
 
@@ -212,22 +214,22 @@ extension Span {
     }
 }
 
-struct MetricPoint: Identifiable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let unit: String
-    let start: Date?
-    let end: Date?
-    let count: Double?
-    let sum: Double?
-    let min: Double?
-    let max: Double?
-    let value: Double?
-    let attributes: [String: JSONValue]
+public struct MetricPoint: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let name: String
+    public let unit: String
+    public let start: Date?
+    public let end: Date?
+    public let count: Double?
+    public let sum: Double?
+    public let min: Double?
+    public let max: Double?
+    public let value: Double?
+    public let attributes: [String: JSONValue]
 
-    var mean: Double? { guard let c = count, c > 0, let s = sum else { return value }; return s / c }
+    public var mean: Double? { guard let c = count, c > 0, let s = sum else { return value }; return s / c }
 
-    init(json: JSONValue, index: Int) {
+    public init(json: JSONValue, index: Int) {
         id = "metric-\(index)"
         name = json["name"]?.string ?? "metric"
         unit = json["unit"]?.string ?? ""

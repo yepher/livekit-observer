@@ -1,3 +1,4 @@
+import ObserverCore
 import Observation
 import SwiftUI
 
@@ -117,6 +118,8 @@ struct PacketCaptureViewer: View {
     @State private var viewer: PacketViewerModel
     @State private var analysis: CaptureAnalysisModel
     @State private var tab = "Call Flow"
+    @State private var explaining = false
+    @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
 
     init(capture: PacketCapture, store: AttachmentStore) {
@@ -134,6 +137,9 @@ struct PacketCaptureViewer: View {
                         .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 Spacer()
+                if !analysis.findings.isEmpty, app.detail?.row.id == viewer.capture.session.sessionID {
+                    Button("Explain findings…", systemImage: "sparkles") { explaining = true }
+                }
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             Picker("Capture view", selection: $tab) {
@@ -210,8 +216,21 @@ struct PacketCaptureViewer: View {
         .padding(20)
         .frame(minWidth: 980, idealWidth: 1200, minHeight: 740, idealHeight: 860)
         .task { analysis.start() }
+        .sheet(isPresented: $explaining) {
+            if let detail = app.detail, let project = app.selectedProject {
+                AIReviewView(detail: detail, project: project, captureEvidence: captureEvidence)
+            }
+        }
         .onChange(of: tab) { _, new in if new == "Packets", viewer.page == nil { viewer.first() } }
         .onDisappear { viewer.cancel(); analysis.cancel() }
+    }
+
+    private var captureEvidence: [AIEvidence] {
+        [AIEvidence(id: "capture-coverage", kind: "Capture limitations", text: "Capture clock is not aligned with the session. Packet timestamps must not be treated as transcript timestamps. " + (analysis.result?.warnings.joined(separator: " ") ?? "Coverage unknown."), date: nil)]
+        + analysis.findings.filter { analysis.selectedCall.isEmpty || $0.callID == nil || $0.callID == analysis.selectedCall }.prefix(30).enumerated().map { index, finding in
+            AIEvidence(id: "capture-finding-\(index)-packet-\(finding.evidence.id)", kind: "Local packet finding: " + finding.rule,
+                       text: AIReviewView.redacted(String((finding.title + "\n" + finding.observation + "\n" + finding.explanation + "\nNext check: " + finding.nextCheck).prefix(2000))), date: nil)
+        }
     }
 
     private var packetTable: some View {

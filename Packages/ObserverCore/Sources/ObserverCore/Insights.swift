@@ -1,26 +1,28 @@
 import Foundation
 
 /// What to look at first in a session: slow turns, interruptions, warnings.
-struct SessionInsights: Sendable {
-    struct Stat: Sendable { let median: Double; let p95: Double; let max: Double; let count: Int }
+public struct SessionInsights: Sendable {
+    public struct Stat: Sendable { public let median: Double; public let p95: Double; public let max: Double; public let count: Int 
+    public init(median: Double, p95: Double, max: Double, count: Int) { self.median = median; self.p95 = p95; self.max = max; self.count = count }
+}
 
-    let agentTurns: Int
-    let userTurns: Int
-    let interruptions: Int
-    let e2e: Stat?
-    let llmTtft: Stat?
-    let ttsTtfb: Stat?
-    let endOfTurn: Stat?
-    let transcription: Stat?
-    let slowTurns: [TranscriptItem]
-    let lowConfidence: [TranscriptItem]
-    let problems: [LogRecord]
-    let failedSpans: [Span]
+    public let agentTurns: Int
+    public let userTurns: Int
+    public let interruptions: Int
+    public let e2e: Stat?
+    public let llmTtft: Stat?
+    public let ttsTtfb: Stat?
+    public let endOfTurn: Stat?
+    public let transcription: Stat?
+    public let slowTurns: [TranscriptItem]
+    public let lowConfidence: [TranscriptItem]
+    public let problems: [LogRecord]
+    public let failedSpans: [Span]
 
-    static let slowTurnMs = 2000.0
-    static let lowConfidence = 0.6
+    public static let slowTurnMs = 2000.0
+    public static let lowConfidence = 0.6
 
-    init(transcript: [TranscriptItem], logs: [LogRecord], spans: [Span]) {
+    public init(transcript: [TranscriptItem], logs: [LogRecord], spans: [Span]) {
         let agent = transcript.filter { $0.role == .agent && $0.kind == "message" }
         let user = transcript.filter { $0.role == .user && $0.kind == "message" }
         agentTurns = agent.count
@@ -37,7 +39,7 @@ struct SessionInsights: Sendable {
         failedSpans = spans.filter(\.failed)
     }
 
-    static func stat(_ values: [Double]) -> Stat? {
+    public static func stat(_ values: [Double]) -> Stat? {
         guard !values.isEmpty else { return nil }
         let sorted = values.sorted()
         func pct(_ p: Double) -> Double { sorted[min(sorted.count - 1, Int((Double(sorted.count - 1) * p).rounded()))] }
@@ -46,8 +48,8 @@ struct SessionInsights: Sendable {
 }
 
 /// A Markdown digest of a session to paste into a coding agent while improving the agent.
-enum SessionReport {
-    static func markdown(row: SessionRow, transcript: [TranscriptItem], insights: SessionInsights, origin: Date?,
+public enum SessionReport {
+    public static func markdown(row: SessionRow, transcript: [TranscriptItem], insights: SessionInsights, origin: Date?,
                          flags: [Flag] = [], logs: [LogRecord] = [], spans: [Span] = []) -> String {
         func clock(_ d: Date?) -> String { Format.offset(d, from: origin) }
         func ms(_ s: SessionInsights.Stat?) -> String {
@@ -102,22 +104,22 @@ enum SessionReport {
     }
 }
 
-enum Format {
-    static func duration(_ seconds: TimeInterval?) -> String {
+public enum Format {
+    public static func duration(_ seconds: TimeInterval?) -> String {
         guard let seconds, seconds.isFinite else { return "–" }
         let s = Int(seconds.rounded())
         return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) : String(format: "%d:%02d", s / 60, s % 60)
     }
-    static func offset(_ date: Date?, from origin: Date?) -> String {
+    public static func offset(_ date: Date?, from origin: Date?) -> String {
         guard let date, let origin else { return date.map { $0.formatted(date: .omitted, time: .standard) } ?? "–" }
         let delta = date.timeIntervalSince(origin)
         return (delta < 0 ? "-" : "") + duration(abs(delta))
     }
-    static func ms(_ value: Double?) -> String { value.map { "\(Int($0.rounded())) ms" } ?? "–" }
+    public static func ms(_ value: Double?) -> String { value.map { "\(Int($0.rounded())) ms" } ?? "–" }
     /// Dollars with enough decimals to show a fraction of a cent.
-    static func dollars(_ value: Double) -> String {
+    public static func dollars(_ value: Double) -> String {
         let digits = value == 0 || value >= 1 ? 2 : min(6, max(2, Int((-log10(value)).rounded(.down)) + 2))
         return "$" + String(format: "%.\(digits)f", value)
     }
-    static func bytes(_ count: Int64) -> String { ByteCountFormatter.string(fromByteCount: count, countStyle: .file) }
+    public static func bytes(_ count: Int64) -> String { ByteCountFormatter.string(fromByteCount: count, countStyle: .file) }
 }

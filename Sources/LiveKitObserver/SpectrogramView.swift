@@ -1,3 +1,4 @@
+import ObserverCore
 import AppKit
 import SwiftUI
 
@@ -29,10 +30,11 @@ struct SpectrogramView: View {
     var body: some View {
         VStack(spacing: 8) {
             controls
+            egressStatus
             if detail.loadingAudio && detail.sources.isEmpty {
                 ProgressView("Downloading recordings…").frame(maxHeight: .infinity)
             } else if detail.sources.isEmpty {
-                ContentUnavailableView("No recording", systemImage: "waveform.slash", description: Text(detail.audioError ?? "This session has no egress or LiveKit recording."))
+                ContentUnavailableView("No recording loaded", systemImage: "waveform.slash", description: Text(model.storageConfigured && detail.row.recording == nil ? "Egress audio appears here once its recording is found in storage." : detail.audioError ?? "This session has no available LiveKit recording."))
             } else {
                 let window = window
                 let groups = ForEach(detail.sources) { source in
@@ -60,11 +62,41 @@ struct SpectrogramView: View {
             }
         }
         .padding([.horizontal, .bottom])
-        .task(id: detail.sources.map(\.id)) { await model.analyze(detail) }
+        .task(id: detail.audioRevision) { await model.analyze(detail) }
+        .onAppear {
+            if model.storageConfigured, detail.row.recording == nil { model.scanRecordings(automatic: true) }
+        }
         .onChange(of: model.player.currentTime) { old, new in follow(from: old, to: new) }
         .onChange(of: detail.row.id) { scrollStart = nil }
         .onAppear { startScrollMonitor() }
         .onDisappear { stopScrollMonitor() }
+    }
+
+    @ViewBuilder private var egressStatus: some View {
+        if !detail.sources.contains(where: { $0.kind == .egress }), model.storageConfigured {
+            HStack(spacing: 8) {
+                if model.scanningRecordings {
+                    ProgressView().controlSize(.small)
+                    Text("Looking for egress recordings…")
+                } else if let error = detail.egressError ?? model.storageError {
+                    Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                    Spacer()
+                    Button("Try Again") {
+                        if detail.row.recording != nil { model.reloadAudio() }
+                        else { model.scanRecordings() }
+                    }
+                } else if detail.row.recording == nil {
+                    Text(model.recordingScan?.complete == true ? "No egress recording found for this session in the last storage scan." : "Egress recordings are still being indexed.")
+                    Spacer()
+                    Button(model.recordingScan?.complete == true ? "Check Storage Again" : "Continue Finding Recordings") { model.scanRecordings() }
+                } else if detail.loadingAudio {
+                    ProgressView().controlSize(.small)
+                    Text("Loading egress audio…")
+                }
+            }
+            .font(.caption).padding(8).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+        }
     }
 
     /// Two-finger swipes left and right (or a mouse's horizontal wheel) scroll a zoomed view, like dragging does.
@@ -310,6 +342,7 @@ private struct Lane: View {
                         .opacity(model.player.isLoaded && !model.player.isAudible(track) ? 0.45 : 1)
                 }
                 FlagBands(flags: detail.flags, window: window, width: geo.size.width)
+                SuggestedBands(ranges: detail.suggestions, window: window, width: geo.size.width)
                 StaticBoxes(items: ttsStatic, window: window, width: geo.size.width)
                 frequencyLabels(size: geo.size)
                 HStack(spacing: 4) {
@@ -529,5 +562,24 @@ private struct FlagBands: View {
             }
         }
         .allowsHitTesting(false)
+    }
+}
+
+private struct SuggestedBands: View {
+    let ranges: [AISuggestionRange]
+    let window: ClosedRange<Date>
+    let width: CGFloat
+    var body: some View {
+        let duration = max(0.001, window.upperBound.timeIntervalSince(window.lowerBound))
+        ZStack(alignment: .topLeading) {
+            ForEach(ranges.filter { $0.end >= window.lowerBound && $0.start <= window.upperBound }) { range in
+                let left = max(0, range.start.timeIntervalSince(window.lowerBound) / duration * width)
+                let right = min(width, range.end.timeIntervalSince(window.lowerBound) / duration * width)
+                Rectangle().fill(.purple.opacity(0.06))
+                    .overlay { Rectangle().strokeBorder(.purple.opacity(0.8), style: StrokeStyle(lineWidth: 1, dash: [4, 3])) }
+                    .frame(width: max(2, right - left)).offset(x: left)
+                    .help("Unaccepted AI suggestion: " + range.text)
+            }
+        }.allowsHitTesting(false)
     }
 }

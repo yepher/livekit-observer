@@ -1,3 +1,4 @@
+import ObserverCore
 import CryptoKit
 import Foundation
 import Security
@@ -109,13 +110,15 @@ enum StorageError: LocalizedError {
     var errorDescription: String? { if case .message(let m) = self { return m }; return nil }
 }
 
-struct StorageObject: Hashable, Sendable {
-    let key: String
-    let size: Int64
-}
-
 struct StorageClient: Sendable {
     let config: StorageConfig
+
+    func listPage(prefix: String, cursor: String? = nil, limit: Int = 100) async throws -> (objects: [StorageObject], nextToken: String?) {
+        var query = [URLQueryItem(name: "list-type", value: "2"), URLQueryItem(name: "prefix", value: prefix),
+                     URLQueryItem(name: "max-keys", value: String(max(1, min(limit, 100))))]
+        if let cursor { query.append(URLQueryItem(name: "continuation-token", value: cursor)) }
+        return try ListObjectsParser.checked(try await get(path: bucketPath(""), query: query))
+    }
 
     func list(prefix: String) async throws -> [StorageObject] {
         var objects: [StorageObject] = []
@@ -140,6 +143,17 @@ struct StorageClient: Sendable {
 
     func object(_ key: String) async throws -> Data {
         try await get(path: bucketPath(key), query: [])
+    }
+
+    func manifest(_ key: String) async throws -> Data {
+        let (bytes, response) = try await URLSession.shared.bytes(for: signedRequest(path: bucketPath(key), query: []))
+        try Self.check(response, data: nil)
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < 4 * 1024 * 1024 else { throw StorageError.message("An egress manifest exceeds the 4 MB limit. Narrow the storage prefix before continuing.") }
+            data.append(byte)
+        }
+        return data
     }
 
     /// The request path for a key: `/bucket/key` path-style, or `/key` on the bucket's own host.
@@ -257,6 +271,16 @@ final class ListObjectsParser: NSObject, XMLParserDelegate {
         let parser = XMLParser(data: data)
         parser.delegate = delegate
         parser.parse()
+        return (delegate.objects, delegate.truncated ? delegate.nextToken : nil)
+    }
+
+    static func checked(_ data: Data) throws -> (objects: [StorageObject], nextToken: String?) {
+        let delegate = ListObjectsParser()
+        let parser = XMLParser(data: data)
+        parser.delegate = delegate
+        guard parser.parse(), !delegate.truncated || delegate.nextToken?.isEmpty == false else {
+            throw StorageError.message("Storage returned an incomplete object page; scan progress was preserved.")
+        }
         return (delegate.objects, delegate.truncated ? delegate.nextToken : nil)
     }
 

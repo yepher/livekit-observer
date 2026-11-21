@@ -1,14 +1,23 @@
 name: LiveKitObserver
 options:
+  postGenCommand: python3 scripts/fix-local-package-references.py
   bundleIdPrefix: com.yepher
   deploymentTarget:
     macOS: "15.0"
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.1.0"
+    MARKETING_VERSION: "0.2.0"
     CURRENT_PROJECT_VERSION: "1"
 packages:
+  ObserverCore:
+    path: Packages/ObserverCore
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift
+    exactVersion: 2.19.0
+  Yams:
+    url: https://github.com/jpsim/Yams
+    exactVersion: 6.2.2
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     exactVersion: 2.10.1
@@ -18,6 +27,9 @@ targets:
     platform: macOS
     sources: [Sources/LiveKitObserver]
     dependencies:
+      - package: ObserverCore
+      - package: LiveKit
+      - package: Yams
       - package: Sparkle
     settings:
       base:
@@ -33,6 +45,7 @@ targets:
         # A local developer tool: it runs `lk` and reads the Keychain, so it is not sandboxed.
         ENABLE_APP_SANDBOX: NO
         ENABLE_HARDENED_RUNTIME: NO
+        CODE_SIGN_ENTITLEMENTS: Config/LiveKitObserver.entitlements
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
       configs:

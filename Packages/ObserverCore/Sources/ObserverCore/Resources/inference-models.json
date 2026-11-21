@@ -1,0 +1,966 @@
+{
+  "source": "https://docs.livekit.io/agents/models/inference/",
+  "fetched": "2026-11-21",
+  "models": [
+    {
+      "id": "google/gemma-4-31b-it",
+      "name": "Gemma 4 31B",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "livekit"
+    },
+    {
+      "id": "deepseek-ai/deepseek-v4-pro",
+      "name": "DeepSeek-V4 Pro",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "vercel"
+    },
+    {
+      "id": "deepseek-ai/deepseek-v4.1-flash",
+      "name": "DeepSeek-V4.1 Flash",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "baseten"
+    },
+    {
+      "id": "deepseek-ai/deepseek-v3",
+      "name": "DeepSeek-V3",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "baseten RETIRED (May 1, 2026; use openai/gpt-oss-120b)"
+    },
+    {
+      "id": "deepseek-ai/deepseek-v3.1",
+      "name": "DeepSeek-V3.1",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "baseten RETIRED (June 17, 2026; use deepseek-ai/deepseek-v4-pro)"
+    },
+    {
+      "id": "deepseek-ai/deepseek-v3.2",
+      "name": "DeepSeek-V3.2",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "deepseek RETIRED (March 7, 2026)"
+    },
+    {
+      "id": "google/gemini-3-flash-preview",
+      "name": "Gemini 3 Flash",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "google"
+    },
+    {
+      "id": "google/gemini-3.1-flash-lite",
+      "name": "Gemini 3.1 Flash Lite",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "google"
+    },
+    {
+      "id": "google/gemini-3.1-pro-preview",
+      "name": "Gemini 3.1 Pro",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "google"
+    },
+    {
+      "id": "google/gemini-3.5-flash",
+      "name": "Gemini 3.5 Flash",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "google"
+    },
+    {
+      "id": "google/gemini-3.5-flash-lite",
+      "name": "Gemini 3.5 Flash Lite",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "google"
+    },
+    {
+      "id": "google/gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "google"
+    },
+    {
+      "id": "google/gemini-4-argon",
+      "name": "Gemini 4 Argon",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "google"
+    },
+    {
+      "id": "google/gemini-4-hydrogen",
+      "name": "Gemini 4 Hydrogen",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "google"
+    },
+    {
+      "id": "google/gemini-4-neon",
+      "name": "Gemini 4 Neon",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "google"
+    },
+    {
+      "id": "google/gemini-decision-1",
+      "name": "Gemini Decision 1",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "google"
+    },
+    {
+      "id": "google/gemini-3.6-flash",
+      "name": "Gemini 3.6 Flash",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "google DEPRECATED (retires November 19, 2026; use google/gemini-3.8-flash)"
+    },
+    {
+      "id": "google/gemini-3.7-flash",
+      "name": "Gemini 3.7 Flash",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "google DEPRECATED (retires January 28, 2027; use google/gemini-3.8-flash)"
+    },
+    {
+      "id": "google/gemini-2.0-flash",
+      "name": "Gemini 2.0 Flash",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "google RETIRED (February 13, 2026; use google/gemma-4-31b-it)"
+    },
+    {
+      "id": "google/gemini-2.0-flash-lite",
+      "name": "Gemini 2.0 Flash-Lite",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "google RETIRED (February 13, 2026; use google/gemma-4-31b-it)"
+    },
+    {
+      "id": "google/gemini-2.5-flash",
+      "name": "Gemini 2.5 Flash",
+      "eu": true,
+      "retired": true,
+      "deprecated": false,
+      "detail": "google RETIRED (October 20, 2026; use google/gemma-4-31b-it)"
+    },
+    {
+      "id": "google/gemini-2.5-flash-lite",
+      "name": "Gemini 2.5 Flash-Lite",
+      "eu": true,
+      "retired": true,
+      "deprecated": false,
+      "detail": "google RETIRED (October 20, 2026; use google/gemma-4-31b-it)"
+    },
+    {
+      "id": "google/gemini-2.5-pro",
+      "name": "Gemini 2.5 Pro",
+      "eu": true,
+      "retired": true,
+      "deprecated": false,
+      "detail": "google RETIRED (October 10, 2026; use google/gemini-3.8-flash)"
+    },
+    {
+      "id": "google/gemini-3-pro-preview",
+      "name": "Gemini 3 Pro",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "google RETIRED (March 9, 2026; use google/gemini-3.1-pro-preview)"
+    },
+    {
+      "id": "meta/muse-spark-1.3",
+      "name": "Muse Spark 1.3",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "meta"
+    },
+    {
+      "id": "meta/muse-wonder-1.0",
+      "name": "Muse Wonder 1.0",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "meta"
+    },
+    {
+      "id": "moonshotai/kimi-k2.6",
+      "name": "Kimi K2.6",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "vercel"
+    },
+    {
+      "id": "moonshotai/kimi-k2-instruct",
+      "name": "Kimi K2 Instruct",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "baseten RETIRED (March 7, 2026)"
+    },
+    {
+      "id": "moonshotai/kimi-k2.5",
+      "name": "Kimi K2.5",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "baseten RETIRED (July 23, 2026; use moonshotai/kimi-k2.6)"
+    },
+    {
+      "id": "openai/chat-latest",
+      "name": "ChatGPT Latest",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "azure; openai"
+    },
+    {
+      "id": "openai/gpt-5",
+      "name": "GPT-5",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "azure; openai DEPRECATED (retires December 11, 2026; use openai/gpt-6-sol)"
+    },
+    {
+      "id": "openai/gpt-5-mini",
+      "name": "GPT-5 mini",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "azure; openai DEPRECATED (retires December 11, 2026; use google/gemma-4-31b-it)"
+    },
+    {
+      "id": "openai/gpt-5-nano",
+      "name": "GPT-5 nano",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "azure; openai DEPRECATED (retires December 11, 2026; use google/gemma-4-31b-it)"
+    },
+    {
+      "id": "openai/gpt-5.2",
+      "name": "GPT-5.2",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "azure; openai"
+    },
+    {
+      "id": "openai/gpt-5.4",
+      "name": "GPT-5.4",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "azure; openai"
+    },
+    {
+      "id": "openai/gpt-5.4-mini",
+      "name": "GPT-5.4 mini",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "azure; openai"
+    },
+    {
+      "id": "openai/gpt-5.5",
+      "name": "GPT-5.5",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "azure; openai"
+    },
+    {
+      "id": "openai/gpt-5.6-luna",
+      "name": "GPT-5.6 Luna",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "azure; openai"
+    },
+    {
+      "id": "openai/gpt-5.6-sol",
+      "name": "GPT-5.6 Sol",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "azure; openai"
+    },
+    {
+      "id": "openai/gpt-5.6-terra",
+      "name": "GPT-5.6 Terra",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "azure; openai"
+    },
+    {
+      "id": "openai/gpt-6-luna",
+      "name": "GPT-6 Luna",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "azure; openai"
+    },
+    {
+      "id": "openai/gpt-6-luna-decisions",
+      "name": "GPT-6 Luna (Decisions)",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "openai"
+    },
+    {
+      "id": "openai/gpt-6-sol",
+      "name": "GPT-6 Sol",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "azure; openai"
+    },
+    {
+      "id": "openai/gpt-6.1-sol",
+      "name": "GPT-6.1 Sol",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "azure; openai"
+    },
+    {
+      "id": "openai/gpt-6.1-terra",
+      "name": "GPT-6.1 Terra",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "openai"
+    },
+    {
+      "id": "openai/gpt-oss-120b",
+      "name": "GPT OSS 120B",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "baseten; groq"
+    },
+    {
+      "id": "openai/gpt-4.1",
+      "name": "GPT-4.1",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "azure DEPRECATED (retires April 14, 2027; use google/gemma-4-31b-it); openai DEPRECATED (retires January 14, 2027; use google/gemma-4-31b-it)"
+    },
+    {
+      "id": "openai/gpt-4.1-mini",
+      "name": "GPT-4.1 mini",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "azure DEPRECATED (retires April 14, 2027; use google/gemma-4-31b-it); openai DEPRECATED (retires January 14, 2027; use google/gemma-4-31b-it)"
+    },
+    {
+      "id": "openai/gpt-4.1-nano",
+      "name": "GPT-4.1 nano",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "azure DEPRECATED (retires April 14, 2027; use google/gemma-4-31b-it); openai DEPRECATED (retires January 14, 2027; use google/gemma-4-31b-it)"
+    },
+    {
+      "id": "openai/gpt-4o",
+      "name": "GPT-4o",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "azure DEPRECATED (retires April 14, 2027; use google/gemma-4-31b-it); openai DEPRECATED (retires January 14, 2027; use google/gemma-4-31b-it)"
+    },
+    {
+      "id": "openai/gpt-4o-mini",
+      "name": "GPT-4o mini",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "azure DEPRECATED (retires April 14, 2027; use google/gemma-4-31b-it); openai DEPRECATED (retires January 14, 2027; use google/gemma-4-31b-it)"
+    },
+    {
+      "id": "openai/gpt-5.1",
+      "name": "GPT-5.1",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "azure DEPRECATED (retires April 1, 2027; use openai/gpt-6-sol); openai DEPRECATED (retires April 1, 2027; use openai/gpt-6-sol)"
+    },
+    {
+      "id": "openai/gpt-5.4-nano",
+      "name": "GPT-5.4 nano",
+      "eu": true,
+      "retired": false,
+      "deprecated": true,
+      "detail": "azure DEPRECATED (retires April 1, 2027; use openai/gpt-6-luna); openai DEPRECATED (retires April 1, 2027; use openai/gpt-6-luna)"
+    },
+    {
+      "id": "openai/gpt-5.1-chat-latest",
+      "name": "GPT-5.1 Chat",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "azure RETIRED (June 19, 2026; use openai/chat-latest); openai RETIRED (July 23, 2026; use openai/chat-latest)"
+    },
+    {
+      "id": "openai/gpt-5.2-chat-latest",
+      "name": "GPT-5.2 Chat",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "azure RETIRED (June 19, 2026; use openai/chat-latest); openai RETIRED (August 10, 2026; use openai/chat-latest)"
+    },
+    {
+      "id": "openai/gpt-5.3-chat-latest",
+      "name": "GPT-5.3 Chat",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "azure RETIRED (June 19, 2026; use openai/gpt-6-sol); openai RETIRED (August 10, 2026; use openai/gpt-6-sol)"
+    },
+    {
+      "id": "xai/grok-4.20-0309-non-reasoning",
+      "name": "Grok 4.20",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "xai"
+    },
+    {
+      "id": "xai/grok-4.20-0309-reasoning",
+      "name": "Grok 4.20 Reasoning",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "xai"
+    },
+    {
+      "id": "xai/grok-4.20-multi-agent-0309",
+      "name": "Grok 4.20 Multi-Agent",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "xai"
+    },
+    {
+      "id": "xai/grok-4.3",
+      "name": "Grok 4.3",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "xai"
+    },
+    {
+      "id": "xai/grok-4.5",
+      "name": "Grok 4.5",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "xai"
+    },
+    {
+      "id": "xai/grok-4.6",
+      "name": "Grok 4.6",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "xai"
+    },
+    {
+      "id": "xai/grok-4.7",
+      "name": "Grok 4.7",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "xai"
+    },
+    {
+      "id": "xai/grok-4-1-fast-non-reasoning",
+      "name": "Grok 4.1 Fast",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "xai RETIRED (August 15, 2026; use xai/grok-4.3)"
+    },
+    {
+      "id": "xai/grok-4-1-fast-reasoning",
+      "name": "Grok 4.1 Fast Reasoning",
+      "eu": false,
+      "retired": true,
+      "deprecated": false,
+      "detail": "xai RETIRED (August 15, 2026; use xai/grok-4.3)"
+    },
+    {
+      "id": "assemblyai/assemblyai-stt-3-7-realtime-agent",
+      "name": "STT 3.7 Realtime Agent",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US, en-GB, en-AU, en-CA, en-IN, en-NZ, es, es-ES, es-MX, es-AR, es-CO, es-CL, es-PE, es-VE, es-EC, es-GT, es-CU, es-BO, es-DO, es-HN, es-PY, es-SV, es-NI, es-CR, es-PA, es-UY, es-PR, fr, fr-FR, fr-CA, fr-BE, fr-CH, de, de-DE, de-AT, de-CH, it, it-IT, it-CH, pt, pt-BR, pt-PT, tr, nl, sv, no, da, fi, hi, vi, ar, he, ja, ur, zh, ru, ko, ca, gl, ro, et, fa, yue, af, mr, zu, xh, nn"
+    },
+    {
+      "id": "assemblyai/universal-3-6-pro",
+      "name": "Universal-3.6 Pro",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US, en-GB, en-AU, en-CA, en-IN, en-NZ, es, es-ES, es-MX, es-AR, es-CO, es-CL, es-PE, es-VE, es-EC, es-GT, es-CU, es-BO, es-DO, es-HN, es-PY, es-SV, es-NI, es-CR, es-PA, es-UY, es-PR, fr, fr-FR, fr-CA, fr-BE, fr-CH, de, de-DE, de-AT, de-CH, it, it-IT, it-CH, pt, pt-BR, pt-PT, tr, nl, sv, no, da, fi, hi, vi, ar, he, ja, ur, zh, ru, ko, ca, gl, ro, et, fa, yue, af, mr, zu, xh, nn"
+    },
+    {
+      "id": "assemblyai/universal-3-5-pro",
+      "name": "Universal-3.5 Pro",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US, en-GB, en-AU, en-CA, en-IN, en-NZ, es, es-ES, es-MX, es-AR, es-CO, es-CL, es-PE, es-VE, es-EC, es-GT, es-CU, es-BO, es-DO, es-HN, es-PY, es-SV, es-NI, es-CR, es-PA, es-UY, es-PR, fr, fr-FR, fr-CA, fr-BE, fr-CH, de, de-DE, de-AT, de-CH, it, it-IT, it-CH, pt, pt-BR, pt-PT, tr, nl, sv, no, da, fi, hi, vi, ar, he, ja, ur, zh"
+    },
+    {
+      "id": "assemblyai/universal-streaming",
+      "name": "Universal-Streaming",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US"
+    },
+    {
+      "id": "assemblyai/universal-streaming-multilingual",
+      "name": "Universal-Streaming-Multilingual",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "multi, en, en-US, en-GB, en-AU, en-CA, en-IN, en-NZ, es, es-ES, es-MX, es-AR, es-CO, es-CL, es-PE, es-VE, es-EC, es-GT, es-CU, es-BO, es-DO, es-HN, es-PY, es-SV, es-NI, es-CR, es-PA, es-UY, es-PR, fr, fr-FR, fr-CA, fr-BE, fr-CH, de, de-DE, de-AT, de-CH, it, it-IT, it-CH, pt, pt-BR, pt-PT"
+    },
+    {
+      "id": "deepgram/flux-general-en",
+      "name": "Flux",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en"
+    },
+    {
+      "id": "deepgram/flux-general-multi",
+      "name": "Flux (Multilingual)",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "multi, en, es, fr, de, hi, ru, pt, ja, it, nl"
+    },
+    {
+      "id": "deepgram/nova-3",
+      "name": "Nova-3",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "ar, ar-AE, ar-SA, ar-QA, ar-KW, ar-SY, ar-LB, ar-PS, ar-JO, ar-EG, ar-SD, ar-TD, ar-MA, ar-DZ, ar-TN, ar-IQ, ar-IR, be, bn, bs, bg, ca, hr, cs, da, da-DK, nl, nl-BE, en, en-US, en-AU, en-GB, en-IN, en-NZ, et, fi, fr, fr-CA, de, de-CH, el, he, hi, hu, id, it, ja, kn, ko, ko-KR, lv, lt, mk, ms, mr, no, fa, pl, pt, pt-BR, pt-PT, ro, ru, sr, sk, sl, es, es-419, sv, sv-SE, tl, ta, te, tr, uk, ur, vi, zh, zh-CN, zh-Hans, zh-TW, zh-Hant, zh-HK, multi"
+    },
+    {
+      "id": "deepgram/nova-3-medical",
+      "name": "Nova-3 Medical",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US, en-AU, en-CA, en-GB, en-IE, en-IN, en-NZ"
+    },
+    {
+      "id": "deepgram/nova-3-pharma",
+      "name": "Nova-3 Pharma",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US, en-AU, en-CA, en-GB, en-IE, en-IN, en-NZ"
+    },
+    {
+      "id": "deepgram/nova-2",
+      "name": "Nova-2",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "multi, bg, ca, zh, zh-CN, zh-Hans, zh-TW, zh-Hant, zh-HK, cs, da, da-DK, nl, nl-BE, en, en-US, en-AU, en-GB, en-NZ, en-IN, et, fi, fr, fr-CA, de, de-CH, el, hi, hu, id, it, ja, ko, ko-KR, lv, lt, ms, no, pl, pt, pt-BR, pt-PT, ro, ru, sk, es, es-419, sv, sv-SE, th, th-TH, tr, uk, vi"
+    },
+    {
+      "id": "deepgram/nova-2-conversationalai",
+      "name": "Nova-2 Conversational AI",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US"
+    },
+    {
+      "id": "deepgram/nova-2-medical",
+      "name": "Nova-2 Medical",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US"
+    },
+    {
+      "id": "deepgram/nova-2-phonecall",
+      "name": "Nova-2 Phone Call",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US"
+    },
+    {
+      "id": "cartesia/ink-2",
+      "name": "Ink 2",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en"
+    },
+    {
+      "id": "cartesia/ink-whisper",
+      "name": "Ink Whisper",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, zh, de, es, ru, ko, fr, ja, pt, tr, pl, ca, nl, ar, sv, it, id, hi, fi, vi, he, uk, el, ms, cs, ro, da, hu, ta, no, th, ur, hr, bg, lt, la, mi, ml, cy, sk, te, fa, lv, bn, sr, az, sl, kn, et, mk, br, eu, is, hy, ne, mn, bs, kk, sq, sw, gl, mr, pa, si, km, sn, yo, so, af, oc, ka, be, tg, sd, gu, am, yi, lo, uz, fo, ht, ps, tk, nn, mt, sa, lb, my, bo, tl, mg, as, tt, haw, ln, ha, ba, jw, su, yue"
+    },
+    {
+      "id": "google/gemini-3.5-transcribe-live",
+      "name": "Gemini 3.5 Transcribe Live",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, es, fr, de, it, pt, nl, pl, tr, ru, ar, hi, ja, ko, zh, id, th, vi, sv, da, no, fi, cs, el, he, uk"
+    },
+    {
+      "id": "inworld/inworld-stt-1",
+      "name": "Inworld STT 1",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US"
+    },
+    {
+      "id": "meta/muse-voice-transcribe-1.0",
+      "name": "Muse Voice Transcribe 1.0",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "ar, bn, de, en, es, fr, he, hi, id, it, ja, kn, ko, mr, ms, nl, pl, pt, ta, te, th, tl, tr, vi, zh"
+    },
+    {
+      "id": "openai/gpt-live-transcribe",
+      "name": "GPT-Live Transcribe",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "af, ar, az, be, bg, bs, ca, cs, cy, da, de, el, en, es, et, fa, fi, fr, gl, he, hi, hr, hu, hy, id, is, it, iw, ja, kk, kn, ko, lt, lv, mi, mk, mr, ms, ne, nl, no, pl, pt, ro, ru, sk, sl, sr, sv, sw, ta, th, tl, tr, uk, ur, vi, zh, zh-cn, zh-tw, zh-hk, yue, cmn, fil, multi"
+    },
+    {
+      "id": "speechmatics/linden-1",
+      "name": "Speechmatics Linden-1",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "ar, ar_en, ba, be, bg, bn, ca, cmn, cmn_en, cmn_en_ms_ta, cs, cy, da, de, el, en, en_ms, en_ta, eo, es, et, eu, fa, fi, fr, ga, gl, he, hi, hr, hu, ia, id, it, ja, ko, lt, lv, mn, mr, ms, mt, nl, no, pl, pt, ro, ru, sk, sl, sv, sw, ta, th, tl, tr, ug, uk, ur, vi, yue"
+    },
+    {
+      "id": "speechmatics/oak-1",
+      "name": "Speechmatics Oak-1",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "multi, ar, ba, be, bg, bn, ca, cmn, cs, cy, da, de, el, en, eo, es, et, eu, fa, fi, fr, ga, gl, he, hi, hr, hu, ia, id, it, ja, ko, lt, lv, mn, mr, ms, mt, nl, no, pl, pt, ro, ru, sk, sl, sv, sw, ta, th, tr, ug, uk, ur, vi, yue"
+    },
+    {
+      "id": "xai/stt-1",
+      "name": "Speech to Text",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, ar, cs, da, nl, fr, de, hi, id, it, ja, ko, ms, fa, pl, pt, ro, ru, es, sv, th, tr, vi, fil, mk"
+    },
+    {
+      "id": "xai/stt-2",
+      "name": "Speech to Text 2",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, ar, cs, da, nl, fr, de, hi, id, it, ja, ko, ms, fa, pl, pt, ro, ru, es, sv, th, tr, vi, fil, mk"
+    },
+    {
+      "id": "assemblyai/assemblyai-tts-1",
+      "name": "AssemblyAI TTS 1",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, es, de, fr, it, pt"
+    },
+    {
+      "id": "cartesia/sonic-3",
+      "name": "Sonic 3",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, de, es, fr, ja, pt, zh, hi, ko, it, nl, pl, ru, sv, tr, tl, bg, ro, ar, cs, el, fi, hr, ms, sk, da, ta, uk, hu, no, vi, bn, th, he, ka, id, te, gu, kn, ml, mr, pa"
+    },
+    {
+      "id": "cartesia/sonic-3-2026-01-12",
+      "name": "Sonic 3 (2026-01-12)",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, de, es, fr, ja, pt, zh, hi, ko, it, nl, pl, ru, sv, tr, tl, bg, ro, ar, cs, el, fi, hr, ms, sk, da, ta, uk, hu, no, vi, bn, th, he, ka, id, te, gu, kn, ml, mr, pa"
+    },
+    {
+      "id": "cartesia/sonic-3-latest",
+      "name": "Sonic 3 Latest",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, de, es, fr, ja, pt, zh, hi, ko, it, nl, pl, ru, sv, tr, tl, bg, ro, ar, cs, el, fi, hr, ms, sk, da, ta, uk, hu, no, vi, bn, th, he, ka, id, te, gu, kn, ml, mr, pa"
+    },
+    {
+      "id": "cartesia/sonic-3.5",
+      "name": "Sonic 3.5",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, de, es, ja, pt, zh, hi, ko, nl, pl, ru, sv, tr, tl, bg, ro, ar, cs, el, fi, hr, ms, sk, da, ta, uk, hu, no, vi, bn, th, he, ka, id, te, gu, kn, ml, mr, pa"
+    },
+    {
+      "id": "cartesia/sonic-3.5-2026-05-04",
+      "name": "Sonic 3.5 (2026-05-04)",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, de, es, ja, pt, zh, hi, ko, nl, pl, ru, sv, tr, tl, bg, ro, ar, cs, el, fi, hr, ms, sk, da, ta, uk, hu, no, vi, bn, th, he, ka, id, te, gu, kn, ml, mr, pa"
+    },
+    {
+      "id": "cartesia/sonic-3.6",
+      "name": "Sonic 3.6",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, fr, de, es, ja, pt, zh, hi, it, ko, nl, pl, ru, sv, tr, tl, bg, ro, ar, cs, el, fi, hr, ms, sk, da, ta, uk, hu, no, vi, bn, th, he, ka, id, te, gu, kn, ml, mr, pa, or, ur"
+    },
+    {
+      "id": "cartesia/sonic-3.6-2026-08-27",
+      "name": "Sonic 3.6 (2026-08-27)",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, fr, de, es, ja, pt, zh, hi, it, ko, nl, pl, ru, sv, tr, tl, bg, ro, ar, cs, el, fi, hr, ms, sk, da, ta, uk, hu, no, vi, bn, th, he, ka, id, te, gu, kn, ml, mr, pa, or, ur"
+    },
+    {
+      "id": "cartesia/sonic-latest",
+      "name": "Sonic Latest",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, de, es, ja, pt, zh, hi, ko, nl, pl, ru, sv, tr, tl, bg, ro, ar, cs, el, fi, hr, ms, sk, da, ta, uk, hu, no, vi, bn, th, he, ka, id, te, gu, kn, ml, mr, pa"
+    },
+    {
+      "id": "cartesia/sonic-preview",
+      "name": "Sonic Preview",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, fr, de, es, ja, pt, zh, hi, it, ko, nl, pl, ru, sv, tr, tl, bg, ro, ar, cs, el, fi, hr, ms, sk, da, ta, uk, hu, no, vi, bn, th, he, ka, id, te, gu, kn, ml, mr, pa, or, ur"
+    },
+    {
+      "id": "deepgram/aura-2",
+      "name": "Aura-2",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US, en-PH, en-GB, en-AU, es, es-CO, es-MX, es-ES, es-419, es-AR, nl, nl-NL, fr, fr-FR, de, de-DE, it, it-IT, ja, ja-JP"
+    },
+    {
+      "id": "deepgram/flux-tts",
+      "name": "Flux TTS",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, en-US, en-GB, en-AU, en-IN"
+    },
+    {
+      "id": "fishaudio/drama-3",
+      "name": "Drama 3",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, zh, ja, de, fr, es, ko, ar, ru, nl, it, pl, pt"
+    },
+    {
+      "id": "fishaudio/s2-pro",
+      "name": "S2 Pro",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, zh, ja, de, fr, es, ko, ar, ru, nl, it, pl, pt"
+    },
+    {
+      "id": "fishaudio/s2.1-pro",
+      "name": "S2.1 Pro",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, zh, ja, de, fr, es, ko, ar, ru, nl, it, pl, pt"
+    },
+    {
+      "id": "google/gemini-3.8-flash-lite-tts",
+      "name": "Gemini 3.8 Flash-Lite TTS",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, ace, af, ak, am, hy, as, awa, ban, bn, bjn, eu, be, bho, bs, bug, bg, yue, ca, ceb, ckb, hne, zh, hr, cs, da, nl, arz, et, fil, fr, gl, lg, ka, de, el, gu, ht, mn, ha, he, hi, hu, is, ilo, id, fa, it, ja, jv, kam, kn, ks, kk, km, ki, rw, kg, ko, ky, lo, ln, mk, mag, mai, ml, mt, mni, mr, min, lus, ne, fuv, az, nso, uz, nb, no, nn, ny, or, pl, pt, pa, ro, ru, sat, sr, si, sk, ps, es, ar, lv, ms, ta, te, vi"
+    },
+    {
+      "id": "google/gemini-3.8-flash-tts",
+      "name": "Gemini 3.8 Flash TTS",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, ace, af, ak, am, hy, as, awa, ban, bn, bjn, ba, eu, be, bem, bho, bs, bug, bg, my, yue, ca, ceb, ckb, hne, zh, crh, hr, cs, da, nl, dyu, dz, arz, et, fil, fi, fr, gl, lg, ka, de, el, gn, gu, ht, mn, ha, he, hi, hu, is, ig, ilo, id, fa, it, ja, jv, kab, kam, kn, ks, kk, km, ki, rw, kg, ko, ky, lo, ltg, ln, lt, lb, mk, mag, mai, ml, mt, mni, mr, min, lus, ne, fuv, az, nso, uz, nb, no, nn, ny, oc, or, pag, pl, pt, pa, ro, ru, sat, sr, sd, si, sk, sl, so, ps, st, es, ar, lv, ms, sw, ss, sv, tg, ta, te, th, ti, sq, ug, vi"
+    },
+    {
+      "id": "gradium/default",
+      "name": "Gradium TTS",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, fr, de, es, pt"
+    },
+    {
+      "id": "gradium/gradium-tts-beta",
+      "name": "Gradium TTS Beta",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, fr, de, es, pt"
+    },
+    {
+      "id": "inworld/inworld-tts-2",
+      "name": "Realtime TTS 2.0",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, zh, ja, ko, ru, it, es, pt, fr, de, pl, nl, hi, he, ar, af, sq, am, hy, as, az, eu, be, bn, bg, my, yue, ca, ceb, hr, cs, da, yih, arz, et, fil, fi, gl, gbm, ka, el, gu, afb, ht, acw, hu, is, id, jv, kn, kk, kok, lo, lv, ayl, lt, lb, mk, mai, mg, ms, ml, mr, mn, ars, ne, uzn, nb, nn, or, acx, ps, fa, pms, pa, ro, sr, sd, si, sk, sl, sw, sv, ta, te, th, aeb, tr, uk, ur, uz, vi, vro, cy"
+    },
+    {
+      "id": "inworld/inworld-tts-2-flash",
+      "name": "Realtime TTS 2.0 Flash",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, zh, ja, ko, ru, it, es, pt, fr, de, pl, nl, hi, he, ar, af, sq, am, hy, as, az, eu, be, bn, bg, my, yue, ca, ceb, hr, cs, da, yih, arz, et, fil, fi, gl, gbm, ka, el, gu, afb, ht, acw, hu, is, id, jv, kn, kk, kok, lo, lv, ayl, lt, lb, mk, mai, mg, ms, ml, mr, mn, ars, ne, uzn, nb, nn, or, acx, ps, fa, pms, pa, ro, sr, sd, si, sk, sl, sw, sv, ta, te, th, aeb, tr, uk, ur, uz, vi, vro, cy"
+    },
+    {
+      "id": "rime/coda",
+      "name": "Coda",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, es, fr, de, hi, ja, pt, ar"
+    },
+    {
+      "id": "rime/mistv3",
+      "name": "Mist v3",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "en, es, fr, de, hi"
+    },
+    {
+      "id": "xai/tts-1",
+      "name": "Text to Speech",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "auto, en, ar-EG, ar-SA, ar-AE, bn, zh, fr, de, hi, id, it, ja, ko, pt-BR, pt-PT, ru, es-MX, es-ES, tr, vi"
+    },
+    {
+      "id": "google/gemini-3.8-live",
+      "name": "Gemini 3.8 Live",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "Turn-based"
+    },
+    {
+      "id": "google/gemini-3.8-live-extended-thinking",
+      "name": "Gemini 3.8 Live Extended Thinking",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "Turn-based"
+    },
+    {
+      "id": "openai/gpt-live-1",
+      "name": "GPT-Live 1",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "Full-duplex"
+    },
+    {
+      "id": "openai/gpt-realtime-2.1",
+      "name": "GPT Realtime 2.1",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "Turn-based"
+    },
+    {
+      "id": "openai/gpt-realtime-2.1-mini",
+      "name": "GPT Realtime 2.1 mini",
+      "eu": true,
+      "retired": false,
+      "deprecated": false,
+      "detail": "Turn-based"
+    },
+    {
+      "id": "rime/prism",
+      "name": "Prism",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "Turn-based"
+    },
+    {
+      "id": "xai/grok-voice-3.0",
+      "name": "Grok Voice 3.0",
+      "eu": false,
+      "retired": false,
+      "deprecated": false,
+      "detail": "Turn-based"
+    }
+  ]
+}

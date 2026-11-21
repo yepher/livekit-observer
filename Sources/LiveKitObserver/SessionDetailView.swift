@@ -1,3 +1,4 @@
+import ObserverCore
 import Charts
 import SwiftUI
 
@@ -11,6 +12,9 @@ struct SessionDetailView: View {
     @Environment(AppModel.self) private var model
     @State private var tab: DetailTab = .overview
     @State private var flagNote = ""
+    @State private var makingScenario = false
+    @State private var showingAIReview = false
+    @State private var showingAudioAI = false
 
     /// Times are shown relative to the recording when there is one.
     var origin: Date? { model.player.origin ?? detail.row.startedAt }
@@ -62,7 +66,20 @@ struct SessionDetailView: View {
             }
         }
         .onChange(of: model.renamingFlag) { _, id in flagNote = detail.flags.first { $0.id == id }?.note ?? "" }
+        .onChange(of: detail.flags) { _, _ in model.noteFlags(of: detail) }
+        .sheet(isPresented: $makingScenario) { MakeScenarioView(detail: detail) }
+        .sheet(isPresented: $showingAIReview) {
+            if let project = model.selectedProject { AIReviewView(detail: detail, project: project).id(project.id + detail.row.id) }
+        }
+        .sheet(isPresented: $showingAudioAI) { if let project = model.selectedProject { AudioAIView(detail: detail, project: project).id(project.id + detail.row.id) } }
         .toolbar {
+            ToolbarItem { Button { showingAudioAI = true } label: { Label("Audio AI", systemImage: "waveform.badge.magnifyingglass") }.disabled(model.selectedProject == nil) }
+            ToolbarItem {
+                Button { showingAIReview = true } label: { Label("AI Review", systemImage: "sparkles") }.disabled(model.selectedProject == nil)
+            }
+            ToolbarItem {
+                Button { makingScenario = true } label: { Label("Make Scenario", systemImage: "checklist") }
+            }
             ToolbarItem {
                 Button { tab = .captures; model.captures.chooseFiles(for: model.captureSession(for: detail.row)) } label: {
                     Label("Add Packet Capture", systemImage: "doc.badge.plus")
@@ -179,6 +196,28 @@ struct OverviewView: View {
         ScrollView {
             if let i = detail.insights {
                 VStack(alignment: .leading, spacing: 20) {
+                    if !detail.resourceStates.isEmpty {
+                        DisclosureGroup("Data readiness") {
+                            ForEach(SessionResource.allCases, id: \.self) { kind in
+                                if let state = detail.resourceStates[kind] {
+                                    HStack { Text(kind.title); Spacer(); Text(state.state.rawValue.capitalized).foregroundStyle(state.state == .settled ? Color.secondary : Color.orange) }
+                                        .font(.caption).help(state.message ?? "Checked \(state.checkedAt.formatted())")
+                                }
+                            }
+                        }
+                    }
+                    AgentProvenanceView(detail: detail)
+                    if let judge = detail.simulationJudge {
+                        GroupBox("Simulation judge · \(judge.status)") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(judge.label).font(.headline)
+                                if !judge.error.isEmpty { Text(judge.error).foregroundStyle(.orange) }
+                                Text(judge.instructions)
+                                Text("Pass criteria: \(judge.expectations)").foregroundStyle(.secondary)
+                                if detail.transcript.isEmpty { Text("Load transcripts from the simulation run to review its exported conversation.").font(.caption) }
+                            }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                        }
+                    }
                     if !detail.flags.isEmpty { FlagsBox(detail: detail, origin: origin) }
                     findings("Possible TTS static", items: detail.ttsStaticFound.map {
                         Finding(date: $0.start, text: String(format: "%.1f s at %.0f dB  ", $0.duration, $0.level) + ($0.text.isEmpty ? "(line text not recorded)" : "“\($0.text)”"))
@@ -295,7 +334,9 @@ struct TranscriptView: View {
         let current = currentItemID
         ScrollViewReader { proxy in
             List(onlyFlagged ? detail.transcript.filter { detail.flag(for: $0) != nil } : detail.transcript) { item in
-                TranscriptRow(item: item, origin: origin, isCurrent: item.id == current, flag: detail.flag(for: item))
+                TranscriptRow(item: item, origin: origin, isCurrent: item.id == current, flag: detail.flag(for: item),
+                              comparison: detail.transcriptionComparisons.first { $0.differs && $0.decision == nil && $0.original == item.text && $0.date == item.start },
+                              suggestion: detail.suggestions.first { range in item.start.map { date in date >= range.start && date <= range.end } ?? false }?.text)
                     .id(item.id)
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2) { model.player.play(at: item.start) }
@@ -335,6 +376,8 @@ struct TranscriptRow: View {
     let origin: Date?
     let isCurrent: Bool
     var flag: Flag?
+    var comparison: TranscriptionComparison?
+    var suggestion: String?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -342,8 +385,13 @@ struct TranscriptRow: View {
             TimeButton(date: item.start, origin: origin).frame(width: 56, alignment: .leading)
             Text(speaker).font(.caption.weight(.semibold)).foregroundStyle(color).frame(width: 64, alignment: .leading)
             VStack(alignment: .leading, spacing: 3) {
-                Text(item.text).textSelection(.enabled)
-                    .font(item.kind == "message" ? .body : .callout.monospaced())
+                if let comparison {
+                    ComparisonWords(comparison: comparison, alternative: false)
+                    HStack { Image(systemName: "sparkles"); Text("Suggested: \(comparison.alternative)") }.font(.caption).foregroundStyle(.purple)
+                } else {
+                    Text(item.text).textSelection(.enabled).font(item.kind == "message" ? .body : .callout.monospaced())
+                }
+                if let suggestion { Label(suggestion, systemImage: "sparkles").font(.caption).foregroundStyle(.purple).help("Unaccepted AI suggestion; review it in AI Review or Audio AI.") }
                 let notes = annotations
                 if !notes.isEmpty {
                     Text(notes.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
@@ -671,6 +719,7 @@ struct MetricsView: View {
 /// What the session cost at the chosen plan's overage rates.
 struct CostBox: View {
     let detail: SessionDetail
+    @State private var aiCosts: [CostLine] = []
     @AppStorage("pricePlan") private var planId = PricePlan.scale.id
     @AppStorage("noiseCancellation") private var noiseCancellation = false
     @Environment(AppModel.self) private var model
@@ -678,7 +727,7 @@ struct CostBox: View {
     var body: some View {
         let plan = PricePlan.named(planId).with(model.pricing)
         let lines = SessionCost.lines(plan: plan, room: detail.room, spans: detail.spans, metrics: detail.metrics, logs: detail.logs,
-                                      transcriptItems: detail.transcript.count, noiseCancellation: noiseCancellation)
+                                      transcriptItems: detail.transcript.count, noiseCancellation: noiseCancellation) + aiCosts
         let total = lines.compactMap(\.cost).reduce(0, +)
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
@@ -712,6 +761,9 @@ struct CostBox: View {
                 }
                 Text("At \(plan.name) overage rates, so this is what the session costs once the month's included usage runs out; before that it is covered by the plan. \(plan.note) Lines marked “billed by” use your own provider keys and are not LiveKit charges. \(model.pricing.map { "Model prices are from LiveKit's price list, \($0.fetched.formatted(.relative(presentation: .named)))." } ?? "Model prices are built in for a few models; LiveKit's full price list couldn't be fetched.")")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if lines.contains(where: { $0.incomplete || $0.cost == nil }) {
+                    Text("Partial estimate: some usage or rates are unknown; Observer AI may include reserved charges.").font(.caption).foregroundStyle(.orange)
+                }
                 if detail.room == nil && !detail.loadingObservability {
                     Text("LiveKit didn't return participant times for this session, so connection costs are missing.").font(.caption).foregroundStyle(.orange)
                 }
@@ -727,6 +779,9 @@ struct CostBox: View {
                 Picker("Plan", selection: $planId) { ForEach(PricePlan.all) { Text($0.name).tag($0.id) } }
                     .labelsHidden().fixedSize().controlSize(.small)
             }
+        }
+        .task(id: "\(detail.row.id):\(detail.aiChargeRevision)") {
+            aiCosts = (try? await AIReviewStore.shared.sessionCosts(project: model.projectIdentity, session: detail.row.id)) ?? []
         }
     }
 }
@@ -832,6 +887,7 @@ struct FlagsBox: View {
                 ForEach(detail.flags) { flag in
                     HStack(alignment: .firstTextBaseline) {
                         Image(systemName: "flag.fill").font(.caption).foregroundStyle(Flag.color)
+                        if let aiModel = flag.aiModel { Image(systemName: "sparkles").foregroundStyle(.purple).help("Accepted AI suggestion from \(aiModel)") }
                         TimeButton(date: flag.start, origin: origin).frame(width: 56, alignment: .leading)
                         Text(flag.note.isEmpty ? "No note" : flag.note).foregroundStyle(flag.note.isEmpty ? .secondary : .primary)
                             .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
@@ -858,5 +914,32 @@ struct SelectionHint: View {
     var body: some View {
         Text(text).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
             .padding().frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct AgentProvenanceView: View {
+    let detail: SessionDetail
+    @Environment(AppModel.self) private var app
+    var body: some View {
+        let evidence = AgentProvenance(logs: detail.logs, spans: detail.spans)
+        if evidence.agentIDs.count > 1 {
+            GroupBox("Agents recorded in this session") {
+                Text(evidence.agentIDs.joined(separator: ", ") + ". Multiple agents were observed; no single served version is assumed.").font(.caption).textSelection(.enabled)
+            }
+        } else if let id = evidence.agentID {
+            GroupBox("Agent that served this session") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(id).font(.caption.monospaced())
+                        Text(evidence.version.map { "Recorded deployment version: " + $0 } ?? (evidence.versions.count > 1 ? "Conflicting recorded versions; inspect the session evidence." : "Exact deployment version was not recorded.")).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(evidence.version == nil ? "Open agent / versions" : "Open recorded version") {
+                        app.operations.configure(cli: app.cli, projectID: app.projectIdentity)
+                        app.operations.selectedAgent = id; app.operations.referencedVersion = evidence.version; app.section = .agents
+                    }
+                }.textSelection(.enabled)
+            }
+        }
     }
 }

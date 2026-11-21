@@ -4,7 +4,14 @@ set -eu
 analysis_repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 analysis_temp=$(mktemp -d "${TMPDIR:-/tmp}/observer-analysis-benchmark.XXXXXX")
 trap 'rm -rf "$analysis_temp"' EXIT HUP INT TERM
-xcrun swiftc -parse-as-library -O -module-cache-path "$analysis_temp/modules" \
+swift build --package-path "${analysis_repo}/Packages/ObserverCore" -c release
+analysis_core=$(swift build --package-path "${analysis_repo}/Packages/ObserverCore" -c release --show-bin-path)
+if [ -f "${analysis_core}/libObserverCore.a" ]; then
+    set -- "${analysis_core}/libObserverCore.a"
+else
+    set -- "${analysis_core}"/ObserverCore.build/*.o
+fi
+xcrun swiftc -parse-as-library -O -target "$(uname -m)-apple-macosx15.0" -I "${analysis_core}" -I "${analysis_core}/Modules" "$@" -lsqlite3 -module-cache-path "$analysis_temp/modules" \
     "$analysis_repo/Sources/LiveKitObserver/PacketCapture.swift" \
     "$analysis_repo/Sources/LiveKitObserver/PacketInspection.swift" \
     "$analysis_repo/Sources/LiveKitObserver/RTPAnalysis.swift" \

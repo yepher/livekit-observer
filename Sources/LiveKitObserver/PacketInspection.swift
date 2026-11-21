@@ -1,3 +1,4 @@
+import ObserverCore
 import Foundation
 
 struct PacketTime: Sendable, Equatable {

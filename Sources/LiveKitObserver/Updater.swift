@@ -1,3 +1,4 @@
+import ObserverCore
 import Sparkle
 import SwiftUI
 

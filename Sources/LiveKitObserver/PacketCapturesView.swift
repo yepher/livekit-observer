@@ -1,3 +1,4 @@
+import ObserverCore
 import AppKit
 import Observation
 import SwiftUI

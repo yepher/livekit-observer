@@ -1,4 +1,5 @@
 import Foundation
+import ObserverCore
 
 @main struct CaptureBenchmark {
     static func main() async throws {

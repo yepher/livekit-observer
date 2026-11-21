@@ -1,3 +1,4 @@
+import ObserverCore
 import Foundation
 import Observation
 
@@ -38,16 +39,15 @@ final class CaptureAnalysisModel {
         let token = UUID(); generation = token; running = true; progress = nil; error = nil
         task = Task { [weak self, capture, store] in
             let file = await store.file(for: capture)
-            let worker = Task.detached(priority: .userInitiated) { [model = self] in
-                try CaptureAnalyzer.scan(file, only: stream, override: override) { progress in
-                    Task { @MainActor in
-                        guard let model, model.generation == token, model.running else { return }
-                        model.progress = progress
+            do {
+                let result = try await MediaResources.compute(project: capture.session.projectKey) { [model = self] in
+                    try CaptureAnalyzer.scan(file, only: stream, override: override) { progress in
+                        Task { @MainActor in
+                            guard let model, model.generation == token, model.running else { return }
+                            model.progress = progress
+                        }
                     }
                 }
-            }
-            do {
-                let result = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
                 guard let self, self.generation == token, !Task.isCancelled else { return }
                 if let stream, let replacement = result.streams.first, let index = self.result?.streams.firstIndex(where: { $0.key == stream }) {
                     self.result?.streams[index] = replacement

@@ -1,24 +1,26 @@
 import Foundation
 
 /// What LiveKit reports about a room's participants and bandwidth (`lk analytics session get`).
-struct RoomUsage: Sendable, Hashable {
-    struct Participant: Sendable, Hashable {
-        let identity: String
-        let seconds: Double
+public struct RoomUsage: Sendable, Hashable {
+    public struct Participant: Sendable, Hashable {
+        public let identity: String
+        public let seconds: Double
         /// Agents join as `agent-AJ_…`, egress as `EG_…`.
-        var isAgent: Bool { identity.hasPrefix("agent-") }
-        var isEgress: Bool { identity.hasPrefix("EG_") }
-    }
+        public var isAgent: Bool { identity.hasPrefix("agent-") }
+        public var isEgress: Bool { identity.hasPrefix("EG_") }
+    
+    public init(identity: String, seconds: Double) { self.identity = identity; self.seconds = seconds }
+}
 
-    let participants: [Participant]
-    let bytesOut: Double
+    public let participants: [Participant]
+    public let bytesOut: Double
 
-    init(participants: [Participant], bytesOut: Double) {
+    public init(participants: [Participant], bytesOut: Double) {
         self.participants = participants
         self.bytesOut = bytesOut
     }
 
-    init?(json: JSONValue) {
+    public init?(json: JSONValue) {
         guard let detail = json["detail"] ?? json["session"] else { return nil }
         participants = (detail["participants"]?.array ?? []).map { p in
             let sessions = p["sessions"]?.array ?? []
@@ -29,52 +31,54 @@ struct RoomUsage: Sendable, Hashable {
         bytesOut = detail["bandwidthOut"]?.double ?? 0
     }
 
-    func seconds(_ include: (Participant) -> Bool) -> Double { participants.filter(include).map(\.seconds).reduce(0, +) }
+    public func seconds(_ include: (Participant) -> Bool) -> Double { participants.filter(include).map(\.seconds).reduce(0, +) }
 }
 
 /// A LiveKit Cloud plan's overage rates, in US dollars. Included allowances are not applied: the
 /// breakdown says what a session costs once the month's allowance is used up.
-struct PricePlan: Identifiable, Sendable {
-    enum Unit: Sendable { case inputTokens, outputTokens, audioHour, characters }
+public struct PricePlan: Identifiable, Sendable {
+    public enum Unit: Sendable { case inputTokens, outputTokens, audioHour, characters }
 
     /// A LiveKit Inference price. `model` matches the reported model name exactly or as a prefix,
     /// so "cartesia/sonic-3" covers sonic-3.5 and sonic-3.6.
-    struct ModelRate: Sendable {
-        let model: String
-        let unit: Unit
-        let price: Double
-    }
+    public struct ModelRate: Sendable {
+        public let model: String
+        public let unit: Unit
+        public let price: Double
+    
+    public init(model: String, unit: Unit, price: Double) { self.model = model; self.unit = unit; self.price = price }
+}
 
-    let id: String
-    let monthly: Double
-    let agentMinute: Double
-    let participantMinute: Double
-    let downstreamGB: Double
-    let transcodeAudioMinute: Double
-    let observabilityAudioMinute: Double
-    let observabilityEvent: Double
-    let noiseCancellationMinute: Double
+    public let id: String
+    public let monthly: Double
+    public let agentMinute: Double
+    public let participantMinute: Double
+    public let downstreamGB: Double
+    public let transcodeAudioMinute: Double
+    public let observabilityAudioMinute: Double
+    public let observabilityEvent: Double
+    public let noiseCancellationMinute: Double
     /// Built in for a few models; replaced by LiveKit's full price list once it has been fetched.
-    var inference: [ModelRate]
-    let note: String
+    public var inference: [ModelRate]
+    public let note: String
 
-    var name: String { id }
+    public var name: String { id }
 
     /// This plan with model prices from LiveKit's price list, when the list has prices for it.
-    func with(_ catalog: PricingCatalog?) -> PricePlan {
+    public func with(_ catalog: PricingCatalog?) -> PricePlan {
         guard let rates = catalog?.rates[id.lowercased()], !rates.isEmpty else { return self }
         var plan = self
         plan.inference = rates
         return plan
     }
 
-    func rate(model: String, unit: Unit) -> Double? {
+    public func rate(model: String, unit: Unit) -> Double? {
         inference.filter { $0.unit == unit && (model == $0.model || model.hasPrefix($0.model)) }
             .max { $0.model.count < $1.model.count }?.price
     }
 
     /// Rates from livekit.com/pricing and a November 2026 Scale invoice (inference credits).
-    static let scale = PricePlan(
+    public static let scale = PricePlan(
         id: "Scale", monthly: 500, agentMinute: 0.01, participantMinute: 0.0004, downstreamGB: 0.10,
         transcodeAudioMinute: 0.004, observabilityAudioMinute: 0.005, observabilityEvent: 0.00003, noiseCancellationMinute: 0.0012,
         inference: [
@@ -88,36 +92,38 @@ struct PricePlan: Identifiable, Sendable {
         note: "Scale: $500 a month includes 50,000 agent minutes, 1.5M participant minutes, 3 TB downstream, 8,000 transcode minutes, 50,000 observability audio minutes, 5M observability events, 10,000 noise cancellation minutes, and $50 of inference.")
 
     /// Ship's rates from livekit.com/pricing. Its model prices come from LiveKit's price list once fetched.
-    static let ship = PricePlan(
+    public static let ship = PricePlan(
         id: "Ship", monthly: 50, agentMinute: 0.01, participantMinute: 0.0005, downstreamGB: 0.12,
         transcodeAudioMinute: 0.005, observabilityAudioMinute: 0.005, observabilityEvent: 0.00003, noiseCancellationMinute: 0.0012,
         inference: [],
         note: "Ship: $50 a month includes 5,000 agent minutes, 150,000 participant minutes, 250 GB downstream, 600 transcode minutes, and $5 of inference. Inference is billed at Ship's model prices.")
 
-    static let all = [scale, ship]
-    static func named(_ id: String) -> PricePlan { all.first { $0.id == id } ?? scale }
+    public static let all = [scale, ship]
+    public static func named(_ id: String) -> PricePlan { all.first { $0.id == id } ?? scale }
+
+    public init(id: String, monthly: Double, agentMinute: Double, participantMinute: Double, downstreamGB: Double, transcodeAudioMinute: Double, observabilityAudioMinute: Double, observabilityEvent: Double, noiseCancellationMinute: Double, inference: [ModelRate], note: String) { self.id = id; self.monthly = monthly; self.agentMinute = agentMinute; self.participantMinute = participantMinute; self.downstreamGB = downstreamGB; self.transcodeAudioMinute = transcodeAudioMinute; self.observabilityAudioMinute = observabilityAudioMinute; self.observabilityEvent = observabilityEvent; self.noiseCancellationMinute = noiseCancellationMinute; self.inference = inference; self.note = note }
 }
 
 /// LiveKit Inference prices for every model and plan, from the price list the LiveKit docs server publishes (the
 /// same data as `lk docs pricing-info --json`). Fetched at most once a day and cached; until then, or if it can't be
 /// reached, the built-in rates are used. Connection, recording, and other rates stay built in: the list gives
 /// those only as sentences.
-struct PricingCatalog: Sendable {
-    let fetched: Date
+public struct PricingCatalog: Sendable {
+    public let fetched: Date
     /// Model prices by plan ID ("build", "ship", "scale").
-    let rates: [String: [PricePlan.ModelRate]]
+    public let rates: [String: [PricePlan.ModelRate]]
 
-    static let endpoint = URL(string: "https://docs.livekit.io/mcp/")!
-    static let maximumAge: TimeInterval = 24 * 3600
+    public static let endpoint = URL(string: "https://docs.livekit.io/mcp/")!
+    public static let maximumAge: TimeInterval = 24 * 3600
 
-    init(fetched: Date, rates: [String: [PricePlan.ModelRate]]) {
+    public init(fetched: Date, rates: [String: [PricePlan.ModelRate]]) {
         self.fetched = fetched
         self.rates = rates
     }
 
     /// Reads the price list's `inference` section: speech-to-text per minute, LLM tokens per million, and
     /// text-to-speech characters per million.
-    init?(json: JSONValue, fetched: Date) {
+    public init?(json: JSONValue, fetched: Date) {
         guard let inference = json["inference"] else { return nil }
         var rates: [String: [PricePlan.ModelRate]] = [:]
         for kind in ["stt", "llm", "tts"] {
@@ -144,7 +150,7 @@ struct PricingCatalog: Sendable {
 
     /// Asks the docs server for the price list. It answers as a server-sent event holding a JSON-RPC result,
     /// whose text is the price list.
-    static func download() async throws -> Data {
+    public static func download() async throws -> Data {
         var request = URLRequest(url: endpoint, timeoutInterval: 30)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -156,7 +162,7 @@ struct PricingCatalog: Sendable {
     }
 
     /// The price list inside a docs server response, which is either plain JSON or server-sent events.
-    static func priceList(fromResponse data: Data) throws -> Data {
+    public static func priceList(fromResponse data: Data) throws -> Data {
         let text = String(decoding: data, as: UTF8.self)
         let body = text.hasPrefix("{") ? text : text.split(separator: "\n").filter { $0.hasPrefix("data:") }
             .map { $0.dropFirst(5).trimmingCharacters(in: .whitespaces) }.joined()
@@ -168,25 +174,31 @@ struct PricingCatalog: Sendable {
 
 /// One line of a session's cost: what was used, the rate, and the cost (nil when the rate is unknown
 /// or the usage is billed by another provider).
-struct CostLine: Identifiable, Hashable, Sendable {
-    enum Group: String, CaseIterable, Sendable { case infrastructure = "LiveKit Cloud", inference = "LiveKit Inference", observability = "Observability" }
-    let group: Group
-    let item: String
-    let quantity: String
-    let rate: String
-    let cost: Double?
-    var id: String { group.rawValue + item }
+public struct CostLine: Identifiable, Hashable, Codable, Sendable {
+    public enum Group: String, CaseIterable, Codable, Sendable { case infrastructure = "LiveKit Cloud", inference = "LiveKit Inference", observability = "Observability", review = "Observer AI review" }
+    public let group: Group
+    public let item: String
+    public let quantity: String
+    public let rate: String
+    public let cost: Double?
+    public var usage: UsageCharge? = nil
+    public var incomplete = false
+    public var id: String { group.rawValue + item }
+
+    public init(group: Group, item: String, quantity: String, rate: String, cost: Double? = nil, usage: UsageCharge? = nil, incomplete: Bool = false) { self.group = group; self.item = item; self.quantity = quantity; self.rate = rate; self.cost = cost; self.usage = usage; self.incomplete = incomplete }
 }
 
-enum SessionCost {
+public enum SessionCost {
     /// Usage of each model through LiveKit Inference, read from the session's traces and metrics.
-    struct ModelUsage: Hashable { var amount: Double = 0; var requests = 0; var unknown = 0; var provider = "" }
+    public struct ModelUsage: Hashable { public var amount: Double = 0; public var requests = 0; public var unknown = 0; public var provider = "" 
+    public init(amount: Double = 0, requests: Int = 0, unknown: Int = 0, provider: String = "") { self.amount = amount; self.requests = requests; self.unknown = unknown; self.provider = provider }
+}
 
-    static func lines(plan: PricePlan, room: RoomUsage?, spans: [Span], metrics: [MetricPoint], logs: [LogRecord],
+    public static func lines(plan: PricePlan, room: RoomUsage?, spans: [Span], metrics: [MetricPoint], logs: [LogRecord],
                       transcriptItems: Int, noiseCancellation: Bool) -> [CostLine] {
         var lines: [CostLine] = []
-        func add(_ group: CostLine.Group, _ item: String, _ quantity: String, _ rate: String, _ cost: Double?) {
-            lines.append(CostLine(group: group, item: item, quantity: quantity, rate: rate, cost: cost))
+        func add(_ group: CostLine.Group, _ item: String, _ quantity: String, _ rate: String, _ cost: Double?, _ usage: UsageCharge? = nil, incomplete: Bool = false) {
+            lines.append(CostLine(group: group, item: item, quantity: quantity, rate: rate, cost: cost, usage: usage, incomplete: incomplete))
         }
         func minutes(_ seconds: Double) -> String { String(format: "%.1f min", seconds / 60) }
         func dollars(_ value: Double) -> String { Format.dollars(value) }
@@ -197,31 +209,31 @@ enum SessionCost {
                 || logs.contains { !($0.attributes["lk.cloud_agent_id"]?.string ?? "").isEmpty }
             let agent = room.seconds(\.isAgent)
             if cloudAgent {
-                add(.infrastructure, "Agent session", minutes(agent), "\(dollars(plan.agentMinute))/min", agent / 60 * plan.agentMinute)
+                add(.infrastructure, "Agent session", minutes(agent), "\(dollars(plan.agentMinute))/min", agent / 60 * plan.agentMinute, .init(rate: .agentMinute, amount: agent / 60))
             } else if agent > 0 {
                 add(.infrastructure, "Agent session (self-hosted)", minutes(agent), "not billed", 0)
             }
             let webrtc = room.seconds { !$0.isEgress }
             add(.infrastructure, "WebRTC participants (\(room.participants.filter { !$0.isEgress }.count))", minutes(webrtc),
-                "\(dollars(plan.participantMinute))/min", webrtc / 60 * plan.participantMinute)
+                "\(dollars(plan.participantMinute))/min", webrtc / 60 * plan.participantMinute, .init(rate: .participantMinute, amount: webrtc / 60))
             let gb = room.bytesOut / 1e9
-            add(.infrastructure, "Downstream data", String(format: "%.1f MB", room.bytesOut / 1e6), "\(dollars(plan.downstreamGB))/GB", gb * plan.downstreamGB)
+            add(.infrastructure, "Downstream data", String(format: "%.1f MB", room.bytesOut / 1e6), "\(dollars(plan.downstreamGB))/GB", gb * plan.downstreamGB, .init(rate: .downstreamGB, amount: gb))
             let egress = room.seconds(\.isEgress)
             if egress > 0 {
-                add(.infrastructure, "Egress transcode (audio)", minutes(egress), "\(dollars(plan.transcodeAudioMinute))/min", egress / 60 * plan.transcodeAudioMinute)
+                add(.infrastructure, "Egress transcode (audio)", minutes(egress), "\(dollars(plan.transcodeAudioMinute))/min", egress / 60 * plan.transcodeAudioMinute, .init(rate: .transcodeAudioMinute, amount: egress / 60))
             }
             if noiseCancellation {
                 let users = room.seconds { !$0.isAgent && !$0.isEgress }
-                add(.infrastructure, "Noise cancellation", minutes(users), "\(dollars(plan.noiseCancellationMinute))/min", users / 60 * plan.noiseCancellationMinute)
+                add(.infrastructure, "Noise cancellation", minutes(users), "\(dollars(plan.noiseCancellationMinute))/min", users / 60 * plan.noiseCancellationMinute, .init(rate: .noiseCancellationMinute, amount: users / 60))
             }
             if !spans.isEmpty || transcriptItems > 0 {
-                add(.observability, "Session recording", minutes(agent), "\(dollars(plan.observabilityAudioMinute))/min", agent / 60 * plan.observabilityAudioMinute)
+                add(.observability, "Session recording", minutes(agent), "\(dollars(plan.observabilityAudioMinute))/min", agent / 60 * plan.observabilityAudioMinute, .init(rate: .observabilityAudioMinute, amount: agent / 60))
             }
         }
         let events = logs.count + spans.count + transcriptItems
         if events > 0 {
             add(.observability, "Logs, spans, and transcript items", "\(events.formatted())", "\(dollars(plan.observabilityEvent * 1000))/1,000",
-                Double(events) * plan.observabilityEvent)
+                Double(events) * plan.observabilityEvent, .init(rate: .observabilityEvent, amount: Double(events)))
         }
 
         // LLM tokens, by model.
@@ -229,19 +241,23 @@ enum SessionCost {
         for span in spans where span.name == "llm_request" {
             let model = span.attributes["gen_ai.request.model"]?.string ?? span.attributes["gen_ai.response.model"]?.string ?? "unknown"
             let provider = span.attributes["gen_ai.provider.name"]?.string ?? ""
-            input[model, default: ModelUsage(provider: provider)].amount += span.attributes["gen_ai.usage.input_tokens"]?.double ?? 0
-            input[model]!.requests += 1
-            output[model, default: ModelUsage(provider: provider)].amount += span.attributes["gen_ai.usage.output_tokens"]?.double ?? 0
+            let usedInput = span.attributes["gen_ai.usage.input_tokens"]?.double.flatMap { $0.isFinite && (0...1e12).contains($0) ? $0 : nil }
+            let usedOutput = span.attributes["gen_ai.usage.output_tokens"]?.double.flatMap { $0.isFinite && (0...1e12).contains($0) ? $0 : nil }
+            input[model, default: ModelUsage(provider: provider)].amount += usedInput ?? 0
+            input[model]!.requests += 1; if usedInput == nil { input[model]!.unknown += 1 }
+            output[model, default: ModelUsage(provider: provider)].amount += usedOutput ?? 0
+            if usedOutput == nil { output[model]!.unknown += 1 }
         }
         for (model, usage) in input.sorted(by: { $0.key < $1.key }) {
             for (label, unit, amount) in [("input", PricePlan.Unit.inputTokens, usage.amount), ("output", .outputTokens, output[model]?.amount ?? 0)] {
-                let quantity = "\(Int(amount).formatted()) tokens"
+                let unknown = unit == .inputTokens ? usage.unknown : (output[model]?.unknown ?? 0)
+                let quantity = "\(Int(amount).formatted()) known tokens" + (unknown > 0 ? " (+\(unknown) requests without usage)" : "")
                 if usage.provider != "livekit" {
                     add(.inference, "LLM \(model) \(label)", quantity, "billed by \(usage.provider.isEmpty ? "provider" : usage.provider)", nil)
                 } else if let price = plan.rate(model: model, unit: unit) {
-                    add(.inference, "LLM \(model) \(label)", quantity, "\(dollars(price))/M", amount / 1e6 * price)
+                    add(.inference, "LLM \(model) \(label)", quantity, "\(dollars(price))/M", amount / 1e6 * price, .init(rate: unit == .inputTokens ? .inputTokens : .outputTokens, amount: amount / 1e6, model: model), incomplete: unknown > 0)
                 } else {
-                    add(.inference, "LLM \(model) \(label)", quantity, "rate unknown", nil)
+                    add(.inference, "LLM \(model) \(label)", quantity, "rate unknown", nil, .init(rate: unit == .inputTokens ? .inputTokens : .outputTokens, amount: amount / 1e6, model: model), incomplete: unknown > 0)
                 }
             }
         }
@@ -261,9 +277,9 @@ enum SessionCost {
             if usage.provider != "livekit" {
                 add(.inference, "STT \(model)", minutes(usage.amount), "billed by \(usage.provider.isEmpty ? "provider" : usage.provider)", nil)
             } else if let price = plan.rate(model: model, unit: .audioHour) {
-                add(.inference, "STT \(model)", minutes(usage.amount), "\(dollars(price))/hour", usage.amount / 3600 * price)
+                add(.inference, "STT \(model)", minutes(usage.amount), "\(dollars(price))/hour", usage.amount / 3600 * price, .init(rate: .audioHour, amount: usage.amount / 3600, model: model))
             } else {
-                add(.inference, "STT \(model)", minutes(usage.amount), "rate unknown", nil)
+                add(.inference, "STT \(model)", minutes(usage.amount), "rate unknown", nil, .init(rate: .audioHour, amount: usage.amount / 3600, model: model))
             }
         }
 
@@ -281,9 +297,9 @@ enum SessionCost {
             if usage.provider != "livekit" {
                 add(.inference, "TTS \(model)", quantity, "billed by \(usage.provider.isEmpty ? "provider" : usage.provider)", nil)
             } else if let price = plan.rate(model: model, unit: .characters) {
-                add(.inference, "TTS \(model)", quantity, "\(dollars(price))/M chars", usage.amount / 1e6 * price)
+                add(.inference, "TTS \(model)", quantity, "\(dollars(price))/M chars", usage.amount / 1e6 * price, .init(rate: .characters, amount: usage.amount / 1e6, model: model), incomplete: usage.unknown > 0)
             } else {
-                add(.inference, "TTS \(model)", quantity, "rate unknown", nil)
+                add(.inference, "TTS \(model)", quantity, "rate unknown", nil, .init(rate: .characters, amount: usage.amount / 1e6, model: model), incomplete: usage.unknown > 0)
             }
         }
         return lines
