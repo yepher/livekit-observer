@@ -160,33 +160,52 @@ struct CaptureJitterView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     ScrollView {
                         VStack(alignment: .leading, spacing: 16) {
-                            HStack(spacing: 24) {
-                                metric("Peak jitter", ms(stream.peakJitterMS))
-                                metric("Mean jitter", ms(stream.meanJitterMS))
-                                metric("Longest interval", ms(stream.peakGapMS))
+                            HStack(alignment: .top, spacing: 12) {
+                                timingMetric("Peak jitter", stream.peakJitterMS, guide: .peak)
+                                timingMetric("Mean jitter", stream.meanJitterMS, guide: .mean)
+                                timingMetric("Longest interval", stream.peakGapMS, guide: .interval)
                                 metric("Sequence gaps", stream.sequence.gaps.map(String.init) ?? "Unknown")
                                 metric("Reordered / duplicate", "\(stream.sequence.reordered) / \(stream.sequence.duplicates)")
                             }
+                            Text("Color ranges follow Holmes as a review guide, not a guarantee of audible quality. Expert review thresholds below are independently adjustable.")
+                                .font(.caption).foregroundStyle(.secondary)
                             Text("Jitter over time").font(.headline)
+                            qualityLegend(.peak)
                             if stream.peakJitterMS == nil {
                                 Text("Jitter is unavailable until two usable packets share a known RTP clock. Supply the clock above if SDP is missing.").foregroundStyle(.secondary)
                             } else {
+                                let domain = chartDomain(stream.chart.map(\.jitterMS))
                                 Chart {
+                                    qualityBands(.peak, domain: domain)
                                     ForEach(stream.chart) { bucket in
                                         if let jitter = bucket.jitterMS {
                                             LineMark(x: .value("Seconds", bucket.seconds), y: .value("Jitter (ms)", jitter)).foregroundStyle(.blue)
                                         }
                                     }
-                                    RuleMark(y: .value("Review threshold", model.jitterThreshold)).foregroundStyle(.orange.opacity(0.5)).lineStyle(StrokeStyle(dash: [4]))
-                                }.chartXAxisLabel("Seconds since this stream began").chartYAxisLabel("Jitter (ms)").frame(height: 180)
+                                    if model.jitterThreshold.isFinite, model.jitterThreshold > 0, domain.contains(model.jitterThreshold) {
+                                        RuleMark(y: .value("Expert review threshold", model.jitterThreshold))
+                                            .foregroundStyle(.secondary.opacity(0.6)).lineStyle(StrokeStyle(dash: [4]))
+                                    }
+                                }.chartYScale(domain: domain)
+                                    .chartXAxisLabel("Seconds since this stream began").chartYAxisLabel("Jitter (ms)").frame(height: 180)
                             }
                             Text("Packet arrival intervals").font(.headline)
-                            Chart(stream.chart) { bucket in
-                                if let gap = bucket.gapMS {
-                                    LineMark(x: .value("Seconds", bucket.seconds), y: .value("Arrival interval (ms)", gap)).foregroundStyle(.purple)
-                                }
-                            }.chartXAxisLabel("Seconds since this stream began").chartYAxisLabel("Interval (ms)").frame(height: 150)
-                            Text("Charts retain peak values in at most 513 buckets. Summary metrics use every analyzed packet. Sequence gaps are capture observations, not a receiver loss percentage.")
+                            qualityLegend(.interval)
+                            if stream.peakGapMS == nil {
+                                Text("Arrival intervals are unavailable until two packets have usable capture timestamps.").foregroundStyle(.secondary)
+                            } else {
+                                let domain = chartDomain(stream.chart.map(\.gapMS))
+                                Chart {
+                                    qualityBands(.interval, domain: domain)
+                                    ForEach(stream.chart) { bucket in
+                                        if let gap = bucket.gapMS {
+                                            LineMark(x: .value("Seconds", bucket.seconds), y: .value("Arrival interval (ms)", gap)).foregroundStyle(.purple)
+                                        }
+                                    }
+                                }.chartYScale(domain: domain)
+                                    .chartXAxisLabel("Seconds since this stream began").chartYAxisLabel("Interval (ms)").frame(height: 150)
+                            }
+                            Text("Axes automatically fit the selected stream’s data; color bands keep their fixed thresholds. Charts retain peak values in at most 513 buckets. Summary metrics use every analyzed packet. Sequence gaps are capture observations, not a receiver loss percentage.")
                                 .font(.caption).foregroundStyle(.secondary)
                             HStack {
                                 if let packet = stream.peakJitterPacket { Button("Inspect Peak Jitter · #\(packet.id)") { inspect(packet) } }
@@ -214,10 +233,96 @@ struct CaptureJitterView: View {
         }.onChange(of: model.selectedStream) { _, _ in clockInput = "" }
     }
 
-    private func ms(_ value: Double?) -> String { value.map { String(format: "%.2f ms", $0) } ?? "Unknown" }
-    private func metric(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) { Text(title).font(.caption).foregroundStyle(.secondary); Text(value).font(.headline.monospacedDigit()) }
+    private func timingMetric(_ title: String, _ value: Double?, guide: JitterGuide) -> some View {
+        let quality = guide.quality(value)
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value.flatMap { $0.isFinite && $0 >= 0 ? String(format: "%.2f ms", $0) : nil } ?? "Unknown")
+                .font(.headline.monospacedDigit()).foregroundStyle(quality.color)
+            Label(quality.rawValue, systemImage: quality.symbol).font(.caption.weight(.semibold)).foregroundStyle(quality.color)
+        }
+        .padding(10).frame(maxWidth: .infinity, minHeight: 82, alignment: .topLeading)
+        .background(quality.color.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(quality.color.opacity(0.3)))
+        .help(guide.explanation)
+        .accessibilityElement(children: .combine)
     }
+
+    private func metric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) { Text(title).font(.caption).foregroundStyle(.secondary); Text(value).font(.headline.monospacedDigit()) }
+            .padding(10).frame(maxWidth: .infinity, minHeight: 82, alignment: .topLeading)
+            .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func qualityLegend(_ guide: JitterGuide) -> some View {
+        HStack(spacing: 20) {
+            Label("Good < \(guide.medium.formatted()) ms", systemImage: JitterQuality.good.symbol).foregroundStyle(JitterQuality.good.color)
+            Label("Medium \(guide.medium.formatted())–\(guide.bad.formatted()) ms", systemImage: JitterQuality.medium.symbol).foregroundStyle(JitterQuality.medium.color)
+            Label("Bad > \(guide.bad.formatted()) ms", systemImage: JitterQuality.bad.symbol).foregroundStyle(JitterQuality.bad.color)
+        }.font(.caption)
+    }
+
+    private func chartDomain(_ samples: [Double?]) -> ClosedRange<Double> {
+        let values = samples.compactMap { $0 }.filter { $0.isFinite && $0 >= 0 }
+        guard let low = values.min(), let high = values.max() else { return 0...1 }
+        // Fit every observed value, including spikes. A small minimum padding keeps
+        // constant/zero series readable without magnifying floating-point noise.
+        let span = high - low
+        let padding = span > 0.001 ? max(span * 0.1, 0.001) : max(high * 0.01, 0.001)
+        return max(0, low - padding)...(high + padding)
+    }
+
+    @ChartContentBuilder private func qualityBands(_ guide: JitterGuide, domain: ClosedRange<Double>) -> some ChartContent {
+        if domain.lowerBound < guide.medium {
+            RectangleMark(yStart: .value("Range start", domain.lowerBound), yEnd: .value("Range end", min(domain.upperBound, guide.medium)))
+                .foregroundStyle(JitterQuality.good.color.opacity(0.12)).accessibilityHidden(true)
+        }
+        if domain.upperBound > guide.medium, domain.lowerBound < guide.bad {
+            RectangleMark(yStart: .value("Range start", max(domain.lowerBound, guide.medium)), yEnd: .value("Range end", min(domain.upperBound, guide.bad)))
+                .foregroundStyle(JitterQuality.medium.color.opacity(0.12)).accessibilityHidden(true)
+        }
+        if domain.upperBound > guide.bad {
+            RectangleMark(yStart: .value("Range start", max(domain.lowerBound, guide.bad)), yEnd: .value("Range end", domain.upperBound))
+                .foregroundStyle(JitterQuality.bad.color.opacity(0.10)).accessibilityHidden(true)
+        }
+    }
+}
+
+private enum JitterQuality: String {
+    case good = "Good", medium = "Medium", bad = "Bad", unknown = "Unknown"
+    var color: Color {
+        switch self {
+        case .good: .green
+        case .medium: .orange
+        case .bad: .red
+        case .unknown: .secondary
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .good: "checkmark.circle.fill"
+        case .medium: "exclamationmark.triangle.fill"
+        case .bad: "xmark.octagon.fill"
+        case .unknown: "questionmark.circle"
+        }
+    }
+}
+
+/// Match Holmes' maxJitterSeverity, meanJitterSeverity and maxDeltaSeverity.
+/// The upper boundary is inclusive in Medium, and unknown never means Good.
+private struct JitterGuide {
+    let medium: Double
+    let bad: Double
+    static let peak = JitterGuide(medium: 5, bad: 30)
+    static let mean = JitterGuide(medium: 2, bad: 10)
+    static let interval = JitterGuide(medium: 50, bad: 100)
+
+    func quality(_ value: Double?) -> JitterQuality {
+        guard let value, value.isFinite, value >= 0 else { return .unknown }
+        if value > bad { return .bad }
+        return value >= medium ? .medium : .good
+    }
+    var explanation: String { "Holmes guide: Good < \(medium.formatted()) ms; Medium \(medium.formatted())–\(bad.formatted()) ms; Bad > \(bad.formatted()) ms. Unknown measurements are not graded." }
 }
 
 struct CaptureFindingsView: View {
