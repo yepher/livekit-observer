@@ -58,10 +58,12 @@ struct SessionRow: Identifiable, Hashable, Sendable {
     let id: String
     var session: LiveKitSession?
     var recording: EgressRecording?
+    /// Minimal durable context for a session with manually imported captures.
+    var localCaptureSession: CaptureSession?
 
-    var roomName: String { session?.roomName ?? recording?.roomName ?? "" }
-    var startedAt: Date? { session?.startedAt ?? recording?.startedAt }
-    var endedAt: Date? { session?.endedAt ?? recording?.endedAt }
+    var roomName: String { session?.roomName ?? recording?.roomName ?? localCaptureSession?.roomName ?? "" }
+    var startedAt: Date? { session?.startedAt ?? recording?.startedAt ?? localCaptureSession?.startedAt }
+    var endedAt: Date? { session?.endedAt ?? recording?.endedAt ?? localCaptureSession?.endedAt }
     var duration: TimeInterval? {
         guard let s = startedAt, let e = endedAt, e > s else { return nil }
         return e.timeIntervalSince(s)

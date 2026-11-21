@@ -139,6 +139,8 @@ final class SessionDetail {
 
 @MainActor @Observable
 final class AppModel {
+    let captures = PacketCaptureModel()
+    private var refreshGeneration = UUID()
     var rows: [SessionRow] = []
     var selection: SessionRow.ID? { didSet { if selection != oldValue { openSelection() } } }
     var detail: SessionDetail?
@@ -203,7 +205,9 @@ final class AppModel {
 
     /// Switches to another `lk` project and reloads everything.
     func selectProject(_ name: String?) {
+        refreshGeneration = UUID()
         UserDefaults.standard.set(name ?? "", forKey: AppSettings.projectKey)
+        projectId = nil
         selection = nil
         rows = []
         manifests = [:]
@@ -270,19 +274,27 @@ final class AppModel {
     }
 
     func refresh() async {
+        let generation = UUID()
+        refreshGeneration = generation
         Task { await loadPricing() }
         settings = AppSettings()
         loading = true
-        defer { loading = false }
+        defer { if refreshGeneration == generation { loading = false } }
+        await captures.load()
+        guard refreshGeneration == generation else { return }
+        mergeLocalCaptureRows()
         async let account: Void = loadAccount()
-        async let sessions = loadSessions()
-        async let recordings = loadRecordings()
+        async let sessions = loadSessions(generation: generation)
+        async let recordings = loadRecordings(generation: generation)
         _ = await account
+        guard refreshGeneration == generation else { return }
         let override = AppSettings.dashboardProjectId(for: project)
         let known = projects.first { $0.name == project } ?? (project == nil && projects.count == 1 ? projects.first : nil)
         projectId = override.isEmpty ? known?.projectId : override
         let (s, r) = await (sessions, recordings)
+        guard refreshGeneration == generation else { return }
         rows = SessionRow.merge(sessions: s, recordings: r)
+        mergeLocalCaptureRows()
         guard let selection, let row = rows.first(where: { $0.id == selection }), detail?.row != row else { return }
         if let detail, detail.row.id == row.id, detail.row.recording == row.recording, (detail.row.session == nil) == (row.session == nil) {
             // Same session with newer details, such as a live session that has ended: keep it open and reread its data.
@@ -291,6 +303,28 @@ final class AppModel {
         } else {
             openSelection()
         }
+    }
+
+    func captureSession(for row: SessionRow) -> CaptureSession? {
+        // An implicit CLI default can change outside the app. Require an explicit project
+        // until the ProjectRef foundation can resolve that default authoritatively.
+        guard let name = project, !name.isEmpty else { return nil }
+        return CaptureSession(projectKey: "lk:" + name, projectName: name, sessionID: row.id,
+                              roomName: row.roomName, startedAt: row.startedAt, endedAt: row.endedAt)
+    }
+
+    func mergeLocalCaptureRows() {
+        var indexed = Dictionary(rows.filter { $0.session != nil || $0.recording != nil }.map { row in
+            var row = row
+            row.localCaptureSession = nil
+            return (row.id, row)
+        }, uniquingKeysWith: { first, _ in first })
+        if let project {
+            for capture in captures.items where capture.session.projectKey == "lk:" + project {
+                indexed[capture.session.sessionID, default: SessionRow(id: capture.session.sessionID)].localCaptureSession = capture.session
+            }
+        }
+        rows = indexed.values.sorted { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
     }
 
     /// Looks up the agent name for a row the list is showing. Only sessions with observability data have logs to read.
@@ -370,25 +404,28 @@ final class AppModel {
         try? JSONEncoder().encode(agentNames).write(to: Self.agentNamesFile, options: .atomic)
     }
 
-    private func loadSessions() async -> [LiveKitSession] {
+    private func loadSessions(generation: UUID) async -> [LiveKitSession] {
+        guard refreshGeneration == generation else { return [] }
         guard let cli else {
             liveKitError = LiveKitCLIError(kind: .missingCLI, message: "The LiveKit CLI (lk) was not found. Install it with `brew install livekit-cli`.")
             return []
         }
         do {
             let sessions = try await cli.sessions()
+            guard refreshGeneration == generation else { return [] }
             liveKitError = nil
             liveKitLoaded = true
             return sessions
         } catch let error as LiveKitCLIError {
-            liveKitError = error
+            if refreshGeneration == generation { liveKitError = error }
         } catch {
-            liveKitError = LiveKitCLIError(kind: .failed, message: error.localizedDescription)
+            if refreshGeneration == generation { liveKitError = LiveKitCLIError(kind: .failed, message: error.localizedDescription) }
         }
         return []
     }
 
-    private func loadRecordings() async -> [EgressRecording] {
+    private func loadRecordings(generation: UUID) async -> [EgressRecording] {
+        guard refreshGeneration == generation else { return [] }
         do {
             guard let client = try storageClient() else {
                 storageConfigured = false
@@ -397,14 +434,19 @@ final class AppModel {
             }
             storageConfigured = true
             let objects = try await client.list(prefix: client.config.prefix)
+            guard refreshGeneration == generation else { return [] }
             let sizes = Dictionary(objects.map { ($0.key, $0.size) }, uniquingKeysWith: { a, _ in a })
             let newManifests = objects.filter { $0.key.hasSuffix(".json") && manifests[$0.key] == nil }
             try await withThrowingTaskGroup(of: (String, EgressRecording?).self) { group in
                 for object in newManifests {
                     group.addTask { (object.key, EgressRecording(manifest: try JSONValue.parse(try await client.object(object.key)))) }
                 }
-                for try await (key, recording) in group { if let recording { manifests[key] = recording } }
+                for try await (key, recording) in group {
+                    guard refreshGeneration == generation else { group.cancelAll(); throw CancellationError() }
+                    if let recording { manifests[key] = recording }
+                }
             }
+            guard refreshGeneration == generation else { return [] }
             storageError = nil
             return manifests.values.compactMap { recording in
                 guard let size = sizes[recording.audioKey] else { return nil }  // manifest without audio
@@ -413,6 +455,7 @@ final class AppModel {
                 return r
             }
         } catch {
+            guard refreshGeneration == generation else { return [] }
             storageError = "Egress storage: \(error.localizedDescription)"
             return manifests.values.map { $0 }
         }
@@ -440,7 +483,7 @@ final class AppModel {
     private func loadObservability(_ detail: SessionDetail) async {
         guard let cli, detail.row.session != nil else {
             detail.observabilityError = detail.row.session == nil
-                ? LiveKitCLIError(kind: .failed, message: "LiveKit has no session for this recording (LiveKit keeps session data for 30 days).")
+                ? LiveKitCLIError(kind: .failed, message: "LiveKit session data is unavailable. Local recordings and imported captures remain accessible.")
                 : liveKitError
             return
         }
@@ -717,17 +760,37 @@ final class AppModel {
     /// session, the same report Copy for Claude makes.
     func saveSessionData(_ row: SessionRow) {
         guard !savingSessions.contains(row.id) else { return }
+        // Freeze all project-sensitive inputs before presenting the panel or awaiting I/O.
+        let exportCLI = cli
+        let exportCaptures = captures.captures(for: captureSession(for: row))
+        let recordings: [(source: URL, name: String)] = [(Self.observabilityFile(row.id), "livekit-recording.ogg")]
+            + (row.recording.map { recording in
+                let file = egressFile(recording)
+                return [(file, "egress-recording." + (file.pathExtension.isEmpty ? "audio" : file.pathExtension))]
+            } ?? [])
+        let open = detail?.row.id == row.id ? detail : nil
+        let flags = open?.flags ?? SessionDetail.loadFlags(row.id)
+        let report = open.flatMap { detail in detail.insights.map {
+            SessionReport.markdown(row: detail.row, transcript: detail.transcript, insights: $0,
+                                   origin: player.origin ?? detail.row.startedAt, flags: flags, logs: detail.logs, spans: detail.spans)
+        } }
         let panel = NSSavePanel()
         panel.title = "Save Session Data"
         panel.message = "Saves a folder with the session's transcript, logs, traces, metrics, recordings, and flags."
         panel.nameFieldStringValue = Self.folderName(for: row)
         panel.canCreateDirectories = true
+        let includeCaptures = NSButton(checkboxWithTitle: "Include \(exportCaptures.count) imported packet capture(s)", target: nil, action: nil)
+        includeCaptures.state = .off
+        includeCaptures.isEnabled = !exportCaptures.isEmpty
+        panel.accessoryView = includeCaptures
         guard panel.runModal() == .OK, let folder = panel.url else { return }
+        let selectedCaptures = includeCaptures.state == .on ? exportCaptures : []
         savingSessions.insert(row.id)
         Task {
             defer { savingSessions.remove(row.id) }
             do {
-                let skipped = try await writeSessionData(row, to: folder)
+                let skipped = try await writeSessionData(row, to: folder, exportCLI: exportCLI, recordings: recordings,
+                                                        flags: flags, report: report, packetCaptures: selectedCaptures)
                 UserDefaults.standard.set(folder.path, forKey: Self.savedFolderKey(row.id))
                 NSWorkspace.shared.activateFileViewerSelecting([folder])
                 if !skipped.isEmpty { saveMessage = "Saved, without:\n" + skipped.joined(separator: "\n") }
@@ -738,28 +801,24 @@ final class AppModel {
     }
 
     /// Writes the session's files into `folder` and returns what it left out and why.
-    private func writeSessionData(_ row: SessionRow, to folder: URL) async throws -> [String] {
+    private func writeSessionData(_ row: SessionRow, to folder: URL, exportCLI: LiveKitCLI?,
+                                  recordings: [(source: URL, name: String)], flags: [Flag], report: String?,
+                                  packetCaptures: [PacketCapture]) async throws -> [String] {
         let files = FileManager.default
         try files.createDirectory(at: folder, withIntermediateDirectories: true)
         var skipped: [String] = []
 
-        if row.session != nil, let cli {
-            let raw = await cli.rawSessionData(row.id)
+        if row.session != nil, let exportCLI {
+            let raw = await exportCLI.rawSessionData(row.id)
             for file in raw.files { try file.data.write(to: folder.appendingPathComponent(file.name), options: .atomic) }
             skipped += raw.failures.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }
         } else if row.session == nil {
-            skipped.append("LiveKit data: LiveKit has no session for this recording (it keeps session data for 30 days).")
+            skipped.append("LiveKit data: this session is available locally only.")
         } else {
             skipped.append("LiveKit data: \(liveKitError?.message ?? "lk is not available.")")
         }
 
         // Recordings are copied only once downloaded, which opening the session does.
-        let recordings: [(source: URL, name: String)] = [
-            (Self.observabilityFile(row.id), "livekit-recording.ogg"),
-        ] + (row.recording.map { recording in
-            let file = egressFile(recording)
-            return [(file, "egress-recording." + (file.pathExtension.isEmpty ? "audio" : file.pathExtension))]
-        } ?? [])
         for recording in recordings {
             guard files.fileExists(atPath: recording.source.path) else {
                 if row.session != nil || recording.name.hasPrefix("egress") { skipped.append("\(recording.name): not downloaded. Open the session first to download it, if there is one.") }
@@ -770,18 +829,18 @@ final class AppModel {
             try files.copyItem(at: recording.source, to: destination)
         }
 
-        let open = detail?.row.id == row.id ? detail : nil
-        let flags = open?.flags ?? SessionDetail.loadFlags(row.id)
         if !flags.isEmpty {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(flags).write(to: folder.appendingPathComponent("flags.json"), options: .atomic)
         }
-        if let open, let insights = open.insights {
-            let report = SessionReport.markdown(row: open.row, transcript: open.transcript, insights: insights,
-                                                origin: player.origin ?? open.row.startedAt, flags: open.flags, logs: open.logs, spans: open.spans)
+        if let report {
             try Data(report.utf8).write(to: folder.appendingPathComponent("report.md"), options: .atomic)
+        }
+        if !packetCaptures.isEmpty {
+            do { try await captures.store.export(packetCaptures, to: folder.appendingPathComponent("packet-captures", isDirectory: true)) }
+            catch { skipped.append("Packet captures: \(error.localizedDescription)") }
         }
         return skipped
     }

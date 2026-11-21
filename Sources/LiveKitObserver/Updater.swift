@@ -10,6 +10,7 @@ final class Updater {
     private let controller: SPUStandardUpdaterController?
 
     private init() {
+        guard NSClassFromString("XCTestCase") == nil else { controller = nil; return }
         // Builds without a Sparkle key (local ./build.sh before setup) would fail every check, so they skip it.
         let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String
         if let key, !key.isEmpty, key != "SPARKLE_PUBLIC_KEY_NOT_SET" {

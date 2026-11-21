@@ -11,12 +11,18 @@ struct LiveKitObserverApp: App {
             ContentView()
                 .environment(model)
                 .frame(minWidth: 1000, minHeight: 640)
-                .task { await model.refresh() }
+                .task {
+                    // Hosted unit tests must not refresh real accounts or prompt for Keychain access.
+                    guard NSClassFromString("XCTestCase") == nil else { return }
+                    await model.refresh()
+                }
                 .onAppear { model.handleSpaceBar() }
         }
         .commands {
             CheckForUpdatesCommand()
             CommandGroup(replacing: .saveItem) {
+                Button("Add Packet Capture…") { model.captures.chooseFiles(for: model.detail.flatMap { model.captureSession(for: $0.row) }) }
+                    .disabled(model.detail == nil || model.captures.importing)
                 Button("Save Session Data…") { if let row = model.detail?.row { model.saveSessionData(row) } }
                     .keyboardShortcut("s")
                     .disabled(model.detail.map { model.savingSessions.contains($0.row.id) } ?? true)
@@ -62,6 +68,14 @@ struct ContentView: View {
         } message: {
             Text(model.saveMessage ?? "")
         }
+        .alert("Packet Captures", isPresented: Binding(get: { model.captures.message != nil }, set: { if !$0 { model.captures.message = nil } })) {
+            Button("OK") { model.captures.message = nil }
+        } message: { Text(model.captures.message ?? "") }
+        .sheet(item: Binding(get: { model.captures.openedCapture }, set: { model.captures.openedCapture = $0 })) { capture in
+            PacketCaptureViewer(capture: capture, store: model.captures.store).id(capture.id)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) { CaptureTransferView(library: model.captures) }
+        .onChange(of: model.captures.revision) { _, _ in model.mergeLocalCaptureRows() }
         .toolbar {
             ToolbarItem(placement: .navigation) { ProjectMenu() }
             ToolbarItem {
@@ -90,7 +104,12 @@ struct SessionListView: View {
                                            flagged: model.isFlagged(row.id), noted: model.hasNotes(row.id),
                                            lessonFlags: model.flaggedInLesson(row) ? max(model.lessonFlagCounts[row.id] ?? 1, 1) : 0).tag(row.id)
                                 .onAppear { model.requestAgentName(for: row) }
+                                .dropDestination(for: URL.self) { urls, _ in
+                                    model.captures.importFiles(urls, to: model.captureSession(for: row))
+                                }
                                 .contextMenu {
+                                    Button("Add Packet Capture…") { model.captures.chooseFiles(for: model.captureSession(for: row)) }
+                                        .disabled(model.captures.importing)
                                     Button(model.isFlagged(row.id) ? "Unflag Session" : "Flag Session") { model.toggleSessionFlag(row.id) }
                                     Divider()
                                     Button("Open in LiveKit Dashboard") { model.openDashboard(row.id) }
@@ -182,7 +201,10 @@ struct SessionRowView: View {
                 if row.session?.hasDetailData == true { Tag(text: "Insights", symbol: "chart.bar.xaxis", color: .blue) }
                 if lessonFlags > 0 { Tag(text: lessonFlags == 1 ? "1 flag" : "\(lessonFlags) flags", symbol: "flag.fill", color: .orange).help("Moments flagged from the lesson page") }
                 if row.session?.status == "active" { Tag(text: "Live", symbol: "dot.radiowaves.left.and.right", color: .red) }
-                if row.session == nil && liveKitLoaded { Tag(text: "Recording only", symbol: "clock.badge.questionmark", color: .gray) }
+                if row.localCaptureSession != nil { Tag(text: "Captures", symbol: "doc.richtext", color: .purple) }
+                if row.session == nil && (liveKitLoaded || row.localCaptureSession != nil) {
+                    Tag(text: row.recording != nil ? "Recording only" : "Saved locally", symbol: "clock.badge.questionmark", color: .gray)
+                }
             }
         }
         .padding(.vertical, 3)
@@ -228,12 +250,20 @@ struct ProjectMenu: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openSettings) private var openSettings
 
+    private var localProjects: [String] {
+        Set(model.captures.items.map { $0.session.projectName })
+            .subtracting(model.projects.map(\.name)).sorted()
+    }
+
     var body: some View {
         Menu {
             Picker("Project", selection: Binding(get: { model.project ?? "" }, set: { model.selectProject($0.isEmpty ? nil : $0) })) {
                 Text("lk default project").tag("")
                 ForEach(model.projects) { project in
                     Text(project.subdomain.map { "\(project.name)  (\($0))" } ?? project.name).tag(project.name)
+                }
+                ForEach(localProjects, id: \.self) { name in
+                    Text("\(name) (saved captures)").tag(name)
                 }
             }
             .pickerStyle(.inline)

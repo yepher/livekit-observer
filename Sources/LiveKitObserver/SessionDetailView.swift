@@ -2,7 +2,7 @@ import Charts
 import SwiftUI
 
 enum DetailTab: String, CaseIterable, Identifiable {
-    case overview = "Overview", spectrogram = "Spectrogram", transcript = "Transcript", logs = "Logs", traces = "Traces", metrics = "Metrics"
+    case overview = "Overview", spectrogram = "Spectrogram", transcript = "Transcript", logs = "Logs", traces = "Traces", metrics = "Metrics", captures = "Captures"
     var id: String { rawValue }
 }
 
@@ -23,7 +23,9 @@ struct SessionDetailView: View {
             Picker("View", selection: $tab) { ForEach(DetailTab.allCases) { Text($0.rawValue).tag($0) } }
                 .pickerStyle(.segmented).labelsHidden().padding(10)
             Group {
-                if tab == .spectrogram {
+                if tab == .captures {
+                    PacketCapturesView(detail: detail)
+                } else if tab == .spectrogram {
                     SpectrogramView(detail: detail, origin: origin)
                 } else if let error = detail.observabilityError, detail.transcript.isEmpty {
                     ContentUnavailableView {
@@ -40,13 +42,14 @@ struct SessionDetailView: View {
                     case .logs: LogsView(detail: detail, origin: origin)
                     case .traces: TracesView(detail: detail, origin: origin)
                     case .metrics: MetricsView(detail: detail)
-                    case .spectrogram: EmptyView()
+                    case .spectrogram, .captures: EmptyView()
                     }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle(detail.row.title)
+        .onAppear { if detail.row.session == nil && detail.row.recording == nil && detail.row.localCaptureSession != nil { tab = .captures } }
         .navigationSubtitle(detail.row.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "")
         .alert("Flag", isPresented: Binding(get: { model.renamingFlag != nil }, set: { if !$0 { model.renamingFlag = nil } })) {
             TextField("What's wrong here?", text: $flagNote)
@@ -60,6 +63,11 @@ struct SessionDetailView: View {
         }
         .onChange(of: model.renamingFlag) { _, id in flagNote = detail.flags.first { $0.id == id }?.note ?? "" }
         .toolbar {
+            ToolbarItem {
+                Button { tab = .captures; model.captures.chooseFiles(for: model.captureSession(for: detail.row)) } label: {
+                    Label("Add Packet Capture", systemImage: "doc.badge.plus")
+                }.disabled(model.captures.importing)
+            }
             ToolbarItem {
                 Button { model.toggleSessionFlag(detail.row.id) } label: {
                     Label(model.isFlagged(detail.row.id) ? "Unflag Session" : "Flag Session", systemImage: model.isFlagged(detail.row.id) ? "flag.fill" : "flag")
