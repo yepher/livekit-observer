@@ -1031,7 +1031,9 @@ final class AppModel {
         let reported = egressStart.timeIntervalSince(livekitStart)
         // Search the whole plausible range around the reported offset, since the two clocks can disagree by a lot.
         let range = max(30, min(300, max(a.duration, b.duration)))
-        let measured = await Task.detached(priority: .userInitiated) { a.startOffset(from: b, expected: reported, range: range) }.value
+        let worker = Task.detached(priority: .userInitiated) { a.startOffset(from: b, expected: reported, range: range) }
+        let measured = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+        guard !Task.isCancelled, detail === self.detail else { return }
         UserDefaults.standard.removeObject(forKey: Self.alignmentKey(detail))
         if let measured {
             setCorrection(measured - reported, how: .byAudio, in: detail)

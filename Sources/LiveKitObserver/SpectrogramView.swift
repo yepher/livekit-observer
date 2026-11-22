@@ -320,24 +320,35 @@ private struct Lane: View {
     var ttsStatic: [TTSStatic] = []
     @Environment(AppModel.self) private var model
     @Environment(\.displayScale) private var scale
-    @State private var image: CGImage?
+    @State private var rendered: (key: Key, image: CGImage)?
     /// When a drag began: the view's left edge, or the playhead and whether it was playing.
     @State private var drag: (edge: Date, time: TimeInterval, wasPlaying: Bool)?
     /// Where the pointer is, for the context menu, which SwiftUI gives no location.
     @State private var pointer: Date?
 
-    private struct Key: Hashable { let from: TimeInterval; let to: TimeInterval; let columns: Int }
+    private struct Key: Hashable {
+        let spectrogramID: UUID
+        let channel: Int
+        let from: TimeInterval
+        let to: TimeInterval
+        let columns: Int
+    }
 
     var body: some View {
         GeometryReader { geo in
             let key = Key(
+                spectrogramID: spectrogram.id, channel: channel,
                 from: window.lowerBound.timeIntervalSince(start), to: window.upperBound.timeIntervalSince(start),
                 columns: min(4000, max(1, Int(geo.size.width * scale)))
             )
             ZStack(alignment: .topLeading) {
                 Rectangle().fill(.black.opacity(0.85))
-                if let image {
-                    Image(decorative: image, scale: 1).resizable().interpolation(.medium)
+                if let rendered, rendered.key.spectrogramID == spectrogram.id, rendered.key.channel == channel {
+                    Image(decorative: rendered.image, scale: 1).resizable().interpolation(.medium)
+                        // Keep the last bitmap lined up with flags and the playhead while its
+                        // replacement is rendering during a pan, zoom or alignment change.
+                        .scaleEffect(x: (rendered.key.to - rendered.key.from) / (key.to - key.from), y: 1, anchor: .leading)
+                        .offset(x: (rendered.key.from - key.from) / (key.to - key.from) * geo.size.width)
                         .scaleEffect(x: pinch, y: 1, anchor: UnitPoint(x: anchor, y: 0.5))
                         .opacity(model.player.isLoaded && !model.player.isAudible(track) ? 0.45 : 1)
                 }
@@ -394,7 +405,11 @@ private struct Lane: View {
                 }
             }
             .contextMenu { flagMenu }
-            .task(id: key) { image = spectrogram.image(channel: channel, from: key.from, to: key.to, columns: key.columns) }
+            .task(id: key) {
+                let image = await SpectrogramRenderer.shared.image(spectrogram, channel: channel, from: key.from, to: key.to, columns: key.columns)
+                guard !Task.isCancelled, let image else { return }
+                rendered = (key, image)
+            }
         }
     }
 

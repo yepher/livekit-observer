@@ -119,6 +119,7 @@ struct CaptureAnalysis: Sendable {
     var lastTime: PacketTime?
     var interfaceEndTimes: [String: PacketTime] = [:]
     var nonmonotonicInterfaces: Set<String> = []
+    // Internal confidence guards for absence-based rules, not evidence of a call fault.
     var undecoded = 0
     var incompleteSIP = 0
     var calls: [String] { Array(Set(messages.map(\.callID))).sorted() }
@@ -202,8 +203,6 @@ enum CaptureAnalyzer {
             result.complete = cursor == nil && page.readThrough == page.fileSize
         } while cursor != nil
         result.streams = streams.values.sorted { $0.firstPacket.id < $1.firstPacket.id }
-        if result.undecoded > 0 { result.warnings.append("\(result.undecoded.formatted()) packets had unsupported headers or IP fragments. They were not analyzed.") }
-        if result.incompleteSIP > 0 { result.warnings.append("\(result.incompleteSIP.formatted()) SIP packets were incomplete or used TCP. TCP/IP reassembly is not supported; some messages may be absent.") }
         return result
     }
 }

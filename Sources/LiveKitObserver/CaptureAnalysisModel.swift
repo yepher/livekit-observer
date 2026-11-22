@@ -8,6 +8,8 @@ final class CaptureAnalysisModel {
     private let store: AttachmentStore
     private(set) var result: CaptureAnalysis?
     private(set) var findings: [CaptureFinding] = []
+    private(set) var jitterOverview: CaptureJitterOverview?
+    var jitterOverviewVisible = true
     private(set) var running = false
     private(set) var progress: CaptureScanProgress?
     private(set) var error: String?
@@ -57,6 +59,7 @@ final class CaptureAnalysisModel {
                     self.selectedCall = result.messages.first?.callID ?? ""
                 }
                 self.running = false; self.task = nil
+                if let analysis = self.result { self.jitterOverview = CaptureJitterOverview(analysis) }
                 self.refreshFindings()
             } catch {
                 guard let self, self.generation == token, !Task.isCancelled else { return }

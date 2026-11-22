@@ -73,7 +73,7 @@ struct CaptureFlowView: View {
                             HStack(spacing: 0) {
                                 Text("Time / packet").frame(width: 125, alignment: .leading)
                                 ForEach(endpoints, id: \.self) { endpoint in
-                                    Text(endpoint).font(.caption.monospaced()).lineLimit(2).frame(width: 180, height: 52).help(endpoint)
+                                    Text(endpoint).font(.caption.monospaced()).lineLimit(2).frame(width: 180, height: 32).help(endpoint)
                                 }
                             }.font(.caption).background(.regularMaterial)
                         }
@@ -106,7 +106,7 @@ private struct BounceRow: View {
         let x1 = CGFloat(source) * 180 + 90, x2 = CGFloat(destination) * 180 + 90
         Button(action: inspect) {
             HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 1) {
                     Text(origin.flatMap { start in event.packet.time?.seconds(since: start) }.map { String(format: "%+.3f s", $0) } ?? "Unknown time")
                     Text("Packet \(event.id)").foregroundStyle(.secondary)
                 }.font(.caption.monospacedDigit()).frame(width: 125, alignment: .leading)
@@ -117,20 +117,20 @@ private struct BounceRow: View {
                             var line = Path(); line.move(to: CGPoint(x: x, y: 0)); line.addLine(to: CGPoint(x: x, y: size.height))
                             context.stroke(line, with: .color(.secondary.opacity(0.3)), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
                         }
-                        var line = Path(); line.move(to: CGPoint(x: x1, y: 42))
+                        var line = Path(); line.move(to: CGPoint(x: x1, y: 25))
                         if source == destination {
-                            line.addLine(to: CGPoint(x: x1 + 45, y: 42)); line.addLine(to: CGPoint(x: x1 + 45, y: 58)); line.addLine(to: CGPoint(x: x2, y: 58))
-                        } else { line.addLine(to: CGPoint(x: x2, y: 42)) }
+                            line.addLine(to: CGPoint(x: x1 + 45, y: 25)); line.addLine(to: CGPoint(x: x1 + 45, y: 35)); line.addLine(to: CGPoint(x: x2, y: 35))
+                        } else { line.addLine(to: CGPoint(x: x2, y: 25)) }
                         context.stroke(line, with: .color(event.color), style: StrokeStyle(lineWidth: 2, dash: event.media ? [6, 3] : []))
                         let direction: CGFloat = x2 > x1 ? 1 : -1
-                        let y: CGFloat = source == destination ? 58 : 42
+                        let y: CGFloat = source == destination ? 35 : 25
                         var arrow = Path(); arrow.move(to: CGPoint(x: x2 - direction * 9, y: y - 5)); arrow.addLine(to: CGPoint(x: x2, y: y)); arrow.addLine(to: CGPoint(x: x2 - direction * 9, y: y + 5))
                         context.stroke(arrow, with: .color(event.color), lineWidth: 2)
                     }
                     Text(event.label).font(.caption.weight(.medium)).foregroundStyle(event.color).lineLimit(1)
-                        .padding(.horizontal, 5).padding(.vertical, 3).background(.background, in: RoundedRectangle(cornerRadius: 4))
-                        .frame(width: max(160, abs(x2 - x1) - 10)).offset(x: min(x1, x2) + (source == destination ? 0 : 5), y: 10)
-                }.frame(width: CGFloat(endpoints.count) * 180, height: 74)
+                        .padding(.horizontal, 5).padding(.vertical, 1).background(.background, in: RoundedRectangle(cornerRadius: 4))
+                        .frame(width: max(160, abs(x2 - x1) - 10)).offset(x: min(x1, x2) + (source == destination ? 0 : 5), y: 2)
+                }.frame(width: CGFloat(endpoints.count) * 180, height: 40)
             }.contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -145,6 +145,23 @@ struct CaptureJitterView: View {
     @State private var clockInput = ""
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Jitter view", selection: $model.jitterOverviewVisible) {
+                Text("All calls").tag(true)
+                Text("One stream").tag(false)
+            }.pickerStyle(.segmented).frame(maxWidth: 340)
+            if model.jitterOverviewVisible, let overview = model.jitterOverview {
+                CaptureJitterOverviewView(overview: overview) { key in
+                    model.selectedStream = key
+                    model.jitterOverviewVisible = false
+                }
+            } else {
+                streamDetail
+            }
+        }
+    }
+
+    private var streamDetail: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let streams = model.result?.streams, !streams.isEmpty {
                 Picker("RTP stream", selection: $model.selectedStream) {
@@ -254,38 +271,154 @@ struct CaptureJitterView: View {
             .padding(10).frame(maxWidth: .infinity, minHeight: 82, alignment: .topLeading)
             .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
     }
+}
 
-    private func qualityLegend(_ guide: JitterGuide) -> some View {
-        HStack(spacing: 20) {
-            Label("Good < \(guide.medium.formatted()) ms", systemImage: JitterQuality.good.symbol).foregroundStyle(JitterQuality.good.color)
-            Label("Medium \(guide.medium.formatted())–\(guide.bad.formatted()) ms", systemImage: JitterQuality.medium.symbol).foregroundStyle(JitterQuality.medium.color)
-            Label("Bad > \(guide.bad.formatted()) ms", systemImage: JitterQuality.bad.symbol).foregroundStyle(JitterQuality.bad.color)
-        }.font(.caption)
+private func qualityLegend(_ guide: JitterGuide) -> some View {
+    HStack(spacing: 20) {
+        Label("Good < \(guide.medium.formatted()) ms", systemImage: JitterQuality.good.symbol).foregroundStyle(JitterQuality.good.color)
+        Label("Medium \(guide.medium.formatted())–\(guide.bad.formatted()) ms", systemImage: JitterQuality.medium.symbol).foregroundStyle(JitterQuality.medium.color)
+        Label("Bad > \(guide.bad.formatted()) ms", systemImage: JitterQuality.bad.symbol).foregroundStyle(JitterQuality.bad.color)
+    }.font(.caption)
+}
+
+private func chartDomain(_ samples: [Double?]) -> ClosedRange<Double> { CaptureJitterOverview.valueDomain(samples) }
+
+@ChartContentBuilder private func qualityBands(_ guide: JitterGuide, domain: ClosedRange<Double>) -> some ChartContent {
+    if domain.lowerBound < guide.medium {
+        RectangleMark(yStart: .value("Range start", domain.lowerBound), yEnd: .value("Range end", min(domain.upperBound, guide.medium)))
+            .foregroundStyle(JitterQuality.good.color.opacity(0.12)).accessibilityHidden(true)
+    }
+    if domain.upperBound > guide.medium, domain.lowerBound < guide.bad {
+        RectangleMark(yStart: .value("Range start", max(domain.lowerBound, guide.medium)), yEnd: .value("Range end", min(domain.upperBound, guide.bad)))
+            .foregroundStyle(JitterQuality.medium.color.opacity(0.12)).accessibilityHidden(true)
+    }
+    if domain.upperBound > guide.bad {
+        RectangleMark(yStart: .value("Range start", max(domain.lowerBound, guide.bad)), yEnd: .value("Range end", domain.upperBound))
+            .foregroundStyle(JitterQuality.bad.color.opacity(0.10)).accessibilityHidden(true)
+    }
+}
+
+/// All calls share the capture's timestamp axis; only a bounded page is drawn at once.
+private struct CaptureJitterOverviewView: View {
+    let overview: CaptureJitterOverview
+    let select: (RTPStreamKey) -> Void
+    @State private var page = 0
+    @State private var measure = Measure.jitter
+
+    private enum Measure: String, CaseIterable {
+        case jitter = "Jitter", interval = "Arrival intervals"
+        var guide: JitterGuide { self == .jitter ? .peak : .interval }
+        var axisLabel: String { self == .jitter ? "Jitter (ms)" : "Interval (ms)" }
+        func value(_ point: JitterBucket) -> Double? { self == .jitter ? point.jitterMS : point.gapMS }
+        func peak(_ series: CaptureJitterOverview.Series) -> Double? { self == .jitter ? series.peakJitterMS : series.peakGapMS }
     }
 
-    private func chartDomain(_ samples: [Double?]) -> ClosedRange<Double> {
-        let values = samples.compactMap { $0 }.filter { $0.isFinite && $0 >= 0 }
-        guard let low = values.min(), let high = values.max() else { return 0...1 }
-        // Fit every observed value, including spikes. A small minimum padding keeps
-        // constant/zero series readable without magnifying floating-point noise.
-        let span = high - low
-        let padding = span > 0.001 ? max(span * 0.1, 0.001) : max(high * 0.01, 0.001)
-        return max(0, low - padding)...(high + padding)
+    private var visible: [CaptureJitterOverview.Series] { overview.page(page) }
+    private let colors: [Color] = [.blue, .purple, .cyan, .pink, .indigo, .brown, .teal, .primary]
+    private func color(_ series: CaptureJitterOverview.Series) -> Color { colors[(series.number - 1) % colors.count] }
+
+    var body: some View {
+        if overview.series.isEmpty {
+            ContentUnavailableView("No RTP streams found", systemImage: "waveform.path",
+                description: Text("The capture may contain only signaling or unrecognizable media."))
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Time-aligned media").font(.headline)
+                    Spacer()
+                    Picker("Measure", selection: $measure) {
+                        ForEach(Measure.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }.pickerStyle(.segmented).frame(width: 270)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        qualityLegend(measure.guide)
+                        plot
+                        Text("Line colors identify streams; background bands show quality ranges. Select a stream below for its clock settings, metrics and packet evidence.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 6) {
+                            ForEach(visible) { series in streamButton(series) }
+                        }
+                        Text("All streams use capture timestamps, including their start offsets. Interface clocks are assumed synchronized. Each overview line retains peaks in at most \(CaptureJitterOverview.maximumPoints) time buckets; open a stream for more detail. SDP matches are hints, not proof of call ownership.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.padding(8)
+                }
+                HStack {
+                    Text("Showing streams \(visible.first?.number ?? 0)–\(visible.last?.number ?? 0) of \(overview.series.count) · Up to \(CaptureJitterOverview.pageSize) at once")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Previous") { page -= 1 }.disabled(page <= 0)
+                    Text("\(min(page + 1, overview.pageCount)) / \(overview.pageCount)").font(.caption.monospacedDigit())
+                    Button("Next") { page += 1 }.disabled(page + 1 >= overview.pageCount)
+                }
+            }
+            .onChange(of: overview.pageCount) { _, count in page = min(page, count - 1) }
+        }
     }
 
-    @ChartContentBuilder private func qualityBands(_ guide: JitterGuide, domain: ClosedRange<Double>) -> some ChartContent {
-        if domain.lowerBound < guide.medium {
-            RectangleMark(yStart: .value("Range start", domain.lowerBound), yEnd: .value("Range end", min(domain.upperBound, guide.medium)))
-                .foregroundStyle(JitterQuality.good.color.opacity(0.12)).accessibilityHidden(true)
+    private var plot: some View {
+        let domain = chartDomain(visible.flatMap { $0.points.map(measure.value) })
+        let measured = visible.filter { $0.points.contains { measure.value($0) != nil } }
+        return VStack(alignment: .leading, spacing: 4) {
+            Chart {
+                qualityBands(measure.guide, domain: domain)
+                ForEach(visible) { series in
+                    let points = series.points.filter { measure.value($0) != nil }
+                    ForEach(points) { point in
+                        if let value = measure.value(point) {
+                            if points.count == 1 {
+                                PointMark(x: .value("Capture seconds", point.seconds), y: .value(measure.axisLabel, value))
+                                    .foregroundStyle(by: .value("Stream", series.label))
+                            } else {
+                                LineMark(x: .value("Capture seconds", point.seconds), y: .value(measure.axisLabel, value))
+                                    .foregroundStyle(by: .value("Stream", series.label))
+                                    .lineStyle(StrokeStyle(lineWidth: 1.5))
+                            }
+                        }
+                    }
+                }
+            }
+            .chartXScale(domain: overview.timeDomain)
+            .chartYScale(domain: domain)
+            .chartForegroundStyleScale(domain: visible.map(\.label), range: visible.map(color))
+            .chartLegend(.hidden)
+            .chartXAxisLabel("Seconds from first captured timestamp")
+            .chartYAxisLabel(measure.axisLabel)
+            .frame(height: 250)
+            .overlay {
+                if measured.isEmpty {
+                    Text(measure == .jitter ? "No jitter estimates on this page. Open a stream to check its RTP clock, or view arrival intervals." : "No timed arrival intervals on this page.")
+                        .font(.callout).padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
+            if measured.count < visible.count {
+                Text("\(visible.count - measured.count) streams have no plottable \(measure.rawValue.lowercased()) on the shared timeline.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
-        if domain.upperBound > guide.medium, domain.lowerBound < guide.bad {
-            RectangleMark(yStart: .value("Range start", max(domain.lowerBound, guide.medium)), yEnd: .value("Range end", min(domain.upperBound, guide.bad)))
-                .foregroundStyle(JitterQuality.medium.color.opacity(0.12)).accessibilityHidden(true)
-        }
-        if domain.upperBound > guide.bad {
-            RectangleMark(yStart: .value("Range start", max(domain.lowerBound, guide.bad)), yEnd: .value("Range end", domain.upperBound))
-                .foregroundStyle(JitterQuality.bad.color.opacity(0.10)).accessibilityHidden(true)
-        }
+    }
+
+    private func streamButton(_ series: CaptureJitterOverview.Series) -> some View {
+        Button { select(series.key) } label: {
+            HStack(alignment: .top, spacing: 6) {
+                Circle().fill(color(series)).frame(width: 8, height: 8).padding(.top, 4)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text("\(series.label) · \(series.codec)").fontWeight(.semibold)
+                        Spacer()
+                        Text(measure.peak(series).map { String(format: "Peak %.2f ms", $0) } ?? "Unknown")
+                            .foregroundStyle(measure.guide.quality(measure.peak(series)).color)
+                    }
+                    Text("\(series.key.source) → \(series.key.destination)").lineLimit(1).truncationMode(.middle)
+                    Text("SSRC \(String(series.key.ssrc, radix: 16)) · PT \(series.key.payloadType) · IF \(series.key.interface) · \(series.timed ? series.call : "No capture time")")
+                        .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }.font(.caption)
+            }
+            .padding(6).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.background.secondary, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }.buttonStyle(.plain)
+            .help("\(series.key.label)\n\(series.call)\nOpen stream details")
     }
 }
 

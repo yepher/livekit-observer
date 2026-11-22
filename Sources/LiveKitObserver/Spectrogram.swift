@@ -8,6 +8,8 @@ import CoreGraphics
 /// Columns are 10 ms apart and centered on their time; cell values map a fixed dBFS range
 /// (`floorDB`…`ceilingDB`) to 0…255, so levels compare across recordings and channels.
 struct Spectrogram: Sendable {
+    /// Distinguishes replacement recordings even when their visible time range is unchanged.
+    let id = UUID()
     static let bands = 80
     static let minHz: Float = 50
     static let maxHz: Float = 12_000
@@ -92,20 +94,44 @@ struct Spectrogram: Sendable {
     /// A pixel covering several columns shows their maximum so short sounds stay visible when zoomed out.
     func image(channel: Int, from start: TimeInterval, to end: TimeInterval, columns: Int) -> CGImage? {
         let bands = Self.bands
-        guard columns > 0, end > start, channel < channels.count else { return nil }
+        guard columns > 0, start.isFinite, end.isFinite, end > start, hop > 0,
+              channels.indices.contains(channel), frameCount > 0 else { return nil }
         let data = channels[channel]
         var pixels = [UInt32](repeating: Colormap.background, count: columns * bands)
         let perColumn = (end - start) / hop / Double(columns)
-        for x in 0..<columns {
-            let first = Int(((start / hop) + Double(x) * perColumn).rounded(.down))
-            let last = max(first, Int(((start / hop) + Double(x + 1) * perColumn).rounded(.down)) - 1)
-            guard last >= 0, first < frameCount else { continue }
-            var peak = [UInt8](repeating: 0, count: bands)
-            for f in max(first, 0)...min(last, frameCount - 1) {
-                for b in 0..<bands { peak[b] = max(peak[b], data[f * bands + b]) }
+        // Reuse storage and borrow the buffers once. Array subscripting and allocating a peak
+        // array for every pixel made a whole-call redraw take seconds in Debug builds.
+        var peak = [UInt8](repeating: 0, count: bands)
+        data.withUnsafeBytes { raw in
+            peak.withUnsafeMutableBytes { scratch in
+                pixels.withUnsafeMutableBufferPointer { pixels in
+                    Colormap.magma.withUnsafeBufferPointer { palette in
+                        let destination = pixels.baseAddress!
+                        let colors = palette.baseAddress!
+                        let levels = scratch.baseAddress!.assumingMemoryBound(to: UInt8.self)
+                        for x in 0..<columns {
+                            if x.isMultiple(of: 32), Task.isCancelled { return }
+                            let firstTime = (start / hop) + Double(x) * perColumn
+                            let lastTime = max(firstTime.rounded(.down), ((start / hop) + Double(x + 1) * perColumn).rounded(.down) - 1)
+                            guard lastTime >= 0, firstTime < Double(frameCount) else { continue }
+                            let first = Int(max(0, firstTime.rounded(.down)))
+                            let last = Int(min(Double(frameCount - 1), lastTime))
+                            let column = raw.baseAddress! + first * bands
+                            scratch.copyMemory(from: UnsafeRawBufferPointer(start: column, count: bands))
+                            if first < last {
+                                for f in (first + 1)...last {
+                                    if f.isMultiple(of: 256), Task.isCancelled { return }
+                                    let values = (raw.baseAddress! + f * bands).assumingMemoryBound(to: UInt8.self)
+                                    for b in 0..<bands { levels[b] = max(levels[b], values[b]) }
+                                }
+                            }
+                            for b in 0..<bands { destination[(bands - 1 - b) * columns + x] = colors[Int(levels[b])] }
+                        }
+                    }
+                }
             }
-            for b in 0..<bands { pixels[(bands - 1 - b) * columns + x] = Colormap.magma[Int(peak[b])] }
         }
+        guard !Task.isCancelled else { return nil }
         return pixels.withUnsafeMutableBytes { raw in
             CGContext(
                 data: raw.baseAddress, width: columns, height: bands, bitsPerComponent: 8, bytesPerRow: columns * 4,
@@ -117,9 +143,23 @@ struct Spectrogram: Sendable {
     /// Loudness per column, summed over bands and channels, with its mean removed.
     var envelope: [Float] {
         var result = [Float](repeating: 0, count: frameCount)
+        var column = [Float](repeating: 0, count: Self.bands)
         for data in channels {
-            for f in 0..<frameCount { for b in 0..<Self.bands { result[f] += Float(data[f * Self.bands + b]) } }
+            data.withUnsafeBufferPointer { data in
+                result.withUnsafeMutableBufferPointer { result in
+                    column.withUnsafeMutableBufferPointer { column in
+                        for f in 0..<frameCount {
+                            if f.isMultiple(of: 256), Task.isCancelled { return }
+                            vDSP_vfltu8(data.baseAddress! + f * Self.bands, 1, column.baseAddress!, 1, vDSP_Length(Self.bands))
+                            var sum: Float = 0
+                            vDSP_sve(column.baseAddress!, 1, &sum, vDSP_Length(Self.bands))
+                            result[f] += sum
+                        }
+                    }
+                }
+            }
         }
+        guard !Task.isCancelled else { return [] }
         let mean = result.isEmpty ? 0 : result.reduce(0, +) / Float(result.count)
         return result.map { $0 - mean }
     }
@@ -129,6 +169,7 @@ struct Spectrogram: Sendable {
     func startOffset(from other: Spectrogram, expected: TimeInterval, range: TimeInterval = 120) -> TimeInterval? {
         guard abs(hop - other.hop) < 1e-9 else { return nil }
         let a = envelope, b = other.envelope
+        guard !Task.isCancelled else { return nil }
         // Short overlaps match by chance, so require a good share of the shorter recording.
         let minimumOverlap = max(100, min(a.count, b.count) / 4)
         let center = Int((expected / hop).rounded()), reach = Int(range / hop)
@@ -152,6 +193,7 @@ struct Spectrogram: Sendable {
         a.withUnsafeBufferPointer { pa in
             b.withUnsafeBufferPointer { pb in
                 for lag in lags {
+                    if Task.isCancelled { return }
                     let i0 = max(0, -lag), i1 = min(a.count, b.count - lag)
                     guard i1 - i0 >= max(minimumOverlap, 2) else { continue }
                     var dot: Float = 0, aa: Float = 0, bb: Float = 0
@@ -172,7 +214,18 @@ struct Spectrogram: Sendable {
     }
 
     /// The center frequency of each band, lowest first.
-    static var bandCenters: [Float] { MelAnalyzer.edges(bands: bands, minHz: minHz, maxHz: maxHz).dropFirst().dropLast().map { $0 } }
+    static let bandCenters: [Float] = MelAnalyzer.edges(bands: bands, minHz: minHz, maxHz: maxHz).dropFirst().dropLast().map { $0 }
+}
+
+/// Bitmap work has its own serial executor so it neither blocks SwiftUI nor waits behind a
+/// long audio decode. Cancelled scroll/resize requests are skipped before touching the data.
+actor SpectrogramRenderer {
+    static let shared = SpectrogramRenderer()
+
+    func image(_ spectrogram: Spectrogram, channel: Int, from: TimeInterval, to: TimeInterval, columns: Int) -> CGImage? {
+        guard !Task.isCancelled else { return nil }
+        return spectrogram.image(channel: channel, from: from, to: to, columns: columns)
+    }
 }
 
 /// One short-time Fourier transform frame → log-mel column, using vDSP.
@@ -187,7 +240,7 @@ private final class MelAnalyzer {
     private var imag: [Float]
     private var power: [Float]
     /// Per band: first FFT bin and its triangular weights.
-    private let filters: [(start: Int, weights: [Float])]
+    private let filters: [(start: Int, weights: [Float], normalization: Float)]
     private let scale: Float
     // For the static measures.
     private let windowEnergy: Float
@@ -196,6 +249,10 @@ private final class MelAnalyzer {
     private var logMagnitude: [Float]
     private var cepReal: [Float]
     private var cepImag: [Float]
+    private let pitchIndices: [Float]
+    private let pitchSum: Float
+    private let pitchDenominator: Float
+    private var pitchValues: [Float]
 
     init(sampleRate: Float) {
         hop = Int((sampleRate / 100).rounded())  // 10 ms
@@ -217,6 +274,11 @@ private final class MelAnalyzer {
         lowBins = min(n / 2, Int(NoiseTrack.lowShareHz / binHz))
         // Pitch periods of 2.5–12.5 ms (80–400 Hz), where voiced speech puts its cepstral peak.
         quefrencies = Int(sampleRate * 0.0025)...min(n / 2 - 1, Int(sampleRate * 0.0125))
+        let indices = quefrencies.map(Float.init)
+        pitchIndices = indices
+        pitchSum = indices.reduce(0, +)
+        pitchDenominator = max(Float(indices.count) * indices.reduce(0) { $0 + $1 * $1 } - pitchSum * pitchSum, 1e-9)
+        pitchValues = [Float](repeating: 0, count: indices.count)
         logMagnitude = [Float](repeating: 0, count: n)
         cepReal = [Float](repeating: 0, count: n / 2)
         cepImag = [Float](repeating: 0, count: n / 2)
@@ -227,12 +289,13 @@ private final class MelAnalyzer {
             let last = min(n / 2, Int((hi / binHz).rounded(.down)))
             guard first <= last else {  // narrower than a bin: take the nearest one
                 let bin = min(n / 2, max(1, Int((mid / binHz).rounded())))
-                return (bin, [1])
+                return (bin, [1], 1)
             }
-            return (first, (first...last).map { k in
+            let weights = (first...last).map { k in
                 let f = Float(k) * binHz
                 return max(0, f < mid ? (f - lo) / (mid - lo) : (hi - f) / (hi - mid))
-            })
+            }
+            return (first, weights, 1 / max(weights.reduce(0, +), 1e-9))
         }
     }
 
@@ -257,18 +320,19 @@ private final class MelAnalyzer {
                 }
                 vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
                 // Packed output: imag[0] holds the Nyquist bin.
+                vDSP_zvmags(&split, 1, &power, 1, vDSP_Length(half))
                 power[0] = r[0] * r[0]
                 power[half] = i[0] * i[0]
-                for k in 1..<half { power[k] = r[k] * r[k] + i[k] * i[k] }
             }
         }
         let span = Spectrogram.ceilingDB - Spectrogram.floorDB
-        for filter in filters {
-            var energy: Float = 0
-            for (j, w) in filter.weights.enumerated() { energy += w * power[filter.start + j] }
-            let total = filter.weights.reduce(0, +)
-            let db = 10 * log10(energy / max(total, 1e-9) * scale + 1e-20)
-            output.append(UInt8(max(0, min(255, (db - Spectrogram.floorDB) / span * 255))))
+        power.withUnsafeBufferPointer { power in
+            for filter in filters {
+                var energy: Float = 0
+                vDSP_dotpr(power.baseAddress! + filter.start, 1, filter.weights, 1, &energy, vDSP_Length(filter.weights.count))
+                let db = 10 * log10(energy * filter.normalization * scale + 1e-20)
+                output.append(UInt8(max(0, min(255, (db - Spectrogram.floorDB) / span * 255))))
+            }
         }
         appendNoiseMeasures(to: &noise)
     }
@@ -280,14 +344,22 @@ private final class MelAnalyzer {
         // Parseval: a one-sided spectrum holds half of n times the windowed frame's energy, and vDSP's ×2
         // scaling makes `power` 4× that, so the frame's mean square is total / (2n), normalized by the window.
         var total: Float = 0, low: Float = 0
-        for k in 1...half { total += power[k] }
-        for k in 1...max(1, lowBins) { low += power[k] }
+        power.withUnsafeBufferPointer { power in
+            vDSP_sve(power.baseAddress! + 1, 1, &total, vDSP_Length(half))
+            vDSP_sve(power.baseAddress! + 1, 1, &low, vDSP_Length(max(1, lowBins)))
+        }
         noise.level.append(10 * log10(total / (2 * Float(size) * windowEnergy) + 1e-12))
         noise.lowShare.append(total > 0 ? low / total : 0)
 
         // Real cepstrum: the FFT of the log magnitude spectrum, mirrored so it is real and even.
-        for k in 0...half { logMagnitude[k] = 0.5 * log(power[k] + 1e-18) }
-        for k in 1..<half { logMagnitude[size - k] = logMagnitude[k] }
+        logMagnitude.withUnsafeMutableBufferPointer { magnitude in
+            var epsilon: Float = 1e-18, factor: Float = 0.5, one: Float = 1
+            var count = Int32(half + 1)
+            vDSP_vsadd(power, 1, &epsilon, magnitude.baseAddress!, 1, vDSP_Length(count))
+            vvlogf(magnitude.baseAddress!, magnitude.baseAddress!, &count)
+            vDSP_vsmul(magnitude.baseAddress!, 1, &factor, magnitude.baseAddress!, 1, vDSP_Length(count))
+            vDSP_vsmul(magnitude.baseAddress! + 1, 1, &one, magnitude.baseAddress! + size - 1, -1, vDSP_Length(half - 1))
+        }
         var prominence: Float = 0
         cepReal.withUnsafeMutableBufferPointer { r in
             cepImag.withUnsafeMutableBufferPointer { i in
@@ -297,20 +369,21 @@ private final class MelAnalyzer {
                 }
                 vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
                 // vDSP doubles the result and the inverse transform divides by n; the packed slot 0 is unused here.
-                let norm = 1 / (2 * Float(size))
+                var norm = 1 / (2 * Float(size))
                 // Peak above the straight line fitted through the pitch range.
-                let q = quefrencies
-                var sx: Float = 0, sy: Float = 0, sxx: Float = 0, sxy: Float = 0
-                var peak: Float = -.infinity, peakAt = q.lowerBound
-                for j in q {
-                    let y = abs(r[j]) * norm, x = Float(j)
-                    sx += x; sy += y; sxx += x * x; sxy += x * y
-                    if y > peak { peak = y; peakAt = j }
+                let count = vDSP_Length(pitchValues.count)
+                var sy: Float = 0, sxy: Float = 0, peak: Float = 0
+                var peakIndex: vDSP_Length = 0
+                pitchValues.withUnsafeMutableBufferPointer { values in
+                    vDSP_vabs(r.baseAddress! + quefrencies.lowerBound, 1, values.baseAddress!, 1, count)
+                    vDSP_vsmul(values.baseAddress!, 1, &norm, values.baseAddress!, 1, count)
+                    vDSP_sve(values.baseAddress!, 1, &sy, count)
+                    vDSP_dotpr(pitchIndices, 1, values.baseAddress!, 1, &sxy, count)
+                    vDSP_maxvi(values.baseAddress!, 1, &peak, &peakIndex, count)
                 }
-                let count = Float(q.count)
-                let slope = (count * sxy - sx * sy) / max(count * sxx - sx * sx, 1e-9)
-                let intercept = (sy - slope * sx) / count
-                prominence = peak - (slope * Float(peakAt) + intercept)
+                let slope = (Float(count) * sxy - pitchSum * sy) / pitchDenominator
+                let intercept = (sy - slope * pitchSum) / Float(count)
+                prominence = peak - (slope * Float(quefrencies.lowerBound + Int(peakIndex)) + intercept)
             }
         }
         noise.harmonicity.append(prominence)

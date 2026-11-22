@@ -14,9 +14,14 @@ private enum AnalysisWire {
         Wire.ethernet(Wire.ipv4(Wire.udp(Data([0x80, pt]) + Wire.n(UInt64(sequence), 2, false)
             + Wire.n(UInt64(timestamp), 4, false) + Wire.n(UInt64(ssrc), 4, false) + Data([0, 0, 0, 0]))))
     }
-    static func sip(_ start: String, cseq: String, call: String = "example", from: String = "a", to: String = "b", body: String = "", reverse: Bool = false) -> Data {
+    static func sip(_ start: String, cseq: String, call: String = "example", from: String = "a", to: String = "b", body: String = "", reverse: Bool = false, tcp: Bool = false) -> Data {
         let text = "\(start)\r\nVia: SIP/2.0/UDP test;branch=z9hG4bK123\r\nFrom: <sip:a@example.com>;tag=\(from)\r\nTo: <sip:b@example.com>;tag=\(to)\r\nCall-ID: \(call)\r\nCSeq: \(cseq)\r\nContent-Type: application/sdp\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
         var bytes = Wire.ethernet(Wire.ipv4(Wire.udp(Data(text.utf8))))
+        if tcp {
+            let header = Wire.n(5060, 2, false) + Wire.n(5061, 2, false) + Data(repeating: 0, count: 8)
+                + Data([0x50, 0x18]) + Data(repeating: 0, count: 6)
+            bytes = Wire.ethernet(Wire.ipv4(header + Data(text.utf8), proto: 6))
+        }
         if reverse {
             bytes.replaceSubrange(26..<34, with: [10, 0, 0, 2, 10, 0, 0, 1])
             bytes.replaceSubrange(34..<38, with: Wire.n(5061, 2, false) + Wire.n(5060, 2, false))
@@ -75,6 +80,7 @@ private enum AnalysisWire {
         let f = try InspectionFixture(AnalysisWire.capture(packets)); defer { f.cleanup() }
         let result = try CaptureAnalyzer.scan(f.file)
         #expect(result.streams.count == 2 && result.streams.allSatisfy { $0.peakJitterMS == nil })
+        #expect(CaptureExpert.findings(result).isEmpty, "An unknown RTP clock is a measurement limit, not an observed audio fault")
         let selected = try #require(result.streams.first?.key)
         let override = RTPClock(rate: 48000, codec: "Manual", source: "Manual override")
         let updated = try CaptureAnalyzer.scan(f.file, only: selected, override: override)
@@ -88,7 +94,35 @@ private enum AnalysisWire {
         let stream = try #require(result.streams.first)
         #expect(stream.sequence.gaps == nil && stream.sequence.discontinuities == 1)
         #expect(stream.peakJitterMS == nil && stream.timingResets == 2)
-        #expect(CaptureExpert.findings(result).contains { $0.rule == "rtp.coverage" })
+        let finding = try #require(CaptureExpert.findings(result).first { $0.rule == "rtp.discontinuity" })
+        #expect(finding.severity == .warning && finding.evidence.id == 2)
+    }
+
+    @Test func routineTCPAndUnsupportedTrafficDoNotGenerateCallWarnings() throws {
+        for tcp in [true, false] {
+            var packets: [(Double, Data)] = [
+                (0, AnalysisWire.sip("INVITE sip:b@example.com SIP/2.0", cseq: "1 INVITE", tcp: tcp)),
+                (1, AnalysisWire.sip("SIP/2.0 200 OK", cseq: "1 INVITE", reverse: true, tcp: tcp))
+            ]
+            // Unsupported framing has the same internal confidence effect as unreassembled SIP.
+            if !tcp { packets.append((2, Data(repeating: 0, count: 14))) }
+            packets += [(10, AnalysisWire.rtp(1, 0)), (10.02, AnalysisWire.rtp(2, 160))]
+            let analysis = try AnalysisWire.scan(packets)
+            #expect(analysis.complete && analysis.warnings.isEmpty)
+            #expect(tcp ? analysis.incompleteSIP == 2 : analysis.undecoded == 1)
+            #expect(CaptureExpert.findings(analysis).isEmpty, "Do not replace removed coverage notes with a false missing-ACK finding")
+        }
+    }
+
+    @Test func missingCaptureTimestampsAreNotAnExpertCallFinding() throws {
+        let rtp = AnalysisWire.rtp(1, 0)
+        let padded = rtp + Data(repeating: 0, count: (4 - rtp.count % 4) % 4)
+        let simple = Wire.block(3, Wire.n(UInt64(rtp.count)) + padded)
+        let f = try InspectionFixture(Wire.section() + Wire.interface() + simple + simple)
+        defer { f.cleanup() }
+        let analysis = try CaptureAnalyzer.scan(f.file)
+        #expect(analysis.streams.first?.untimedPackets == 2)
+        #expect(!CaptureExpert.findings(analysis).contains { $0.rule == "rtp.coverage" || $0.rule == "rtp.discontinuity" })
     }
 
     @Test func chartsStayBoundedAndRetainTimingPeaks() throws {

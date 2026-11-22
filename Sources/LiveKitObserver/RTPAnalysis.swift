@@ -97,6 +97,7 @@ struct RTPStreamAnalysis: Identifiable, Sendable {
     private(set) var clockChanges = 0
     private(set) var unknownClockPackets = 0
     private(set) var timingResets = 0
+    private(set) var discontinuityPacket: InspectedPacket?
     private(set) var untimedPackets = 0
     private(set) var peakJitterMS: Double?
     private(set) var peakJitterPacket: InspectedPacket?
@@ -116,6 +117,8 @@ struct RTPStreamAnalysis: Identifiable, Sendable {
     var meanJitterMS: Double? { jitterCount > 0 ? jitterSum / Double(jitterCount) : nil }
     var duration: Double? { lastPacket.time.flatMap { end in firstPacket.time.flatMap { end.seconds(since: $0) } } }
     var chart: [JitterBucket] { buckets + (pendingBucket.map { [$0] } ?? []) }
+    /// Buckets are relative to the first *timed* packet, which need not be firstPacket.
+    var chartStart: PacketTime? { chartOrigin }
 
     init(packet: InspectedPacket, rtp: RTPHeader) {
         key = RTPStreamKey(packet, rtp); firstPacket = packet; lastPacket = packet
@@ -124,6 +127,8 @@ struct RTPStreamAnalysis: Identifiable, Sendable {
     mutating func add(_ packet: InspectedPacket, rtp: RTPHeader, clock resolved: RTPClock?) {
         count += 1; lastPacket = packet
         let restarted = sequence.add(rtp.sequence)
+        let previousTimingResets = timingResets
+        let previousClockChanges = clockChanges
         if resolved == nil { unknownClockPackets += 1 }
         if let previousClock, let resolved, previousClock.rate != resolved.rate { clockChanges += 1 }
         clock = resolved
@@ -147,6 +152,9 @@ struct RTPStreamAnalysis: Identifiable, Sendable {
             } else { timingResets += 1; jitter = 0 }
         }
         if packet.time == nil { untimedPackets += 1; jitter = 0 }
+        if discontinuityPacket == nil, restarted || timingResets > previousTimingResets || clockChanges > previousClockChanges {
+            discontinuityPacket = packet
+        }
         previousTime = packet.time; previousTimestamp = rtp.timestamp; previousClock = resolved
         if chartOrigin == nil { chartOrigin = packet.time }
         if let time = packet.time, let firstTime = chartOrigin, let seconds = time.seconds(since: firstTime), seconds >= 0 {

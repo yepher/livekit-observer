@@ -140,10 +140,11 @@ enum CaptureExpert {
                     "Late packets fill sequence gaps where possible. Duplicate capture points can also produce duplicate sequence numbers.",
                     "Inspect arrival order and whether this capture combines interfaces or mirrored traffic.")
             }
-            if stream.unknownClockPackets > 0 || stream.timingResets > 0 || stream.sequence.gaps == nil || stream.untimedPackets > 0 || stream.clockChanges > 0 {
-                add("rtp.coverage", .information, "Media timing has coverage limits", "Unknown clock: \(stream.unknownClockPackets) packets; missing timestamps: \(stream.untimedPackets); timing resets: \(stream.timingResets); clock changes: \(stream.clockChanges); sequence resets: \(stream.sequence.discontinuities).",
-                    "Jitter covers only packets with usable capture timestamps and a known, stable RTP clock. Sequence discontinuities make gap totals unavailable.",
-                    "Open Jitter to verify or supply the clock rate. Dynamic payload types need SDP or an explicit clock rate.")
+            if stream.timingResets > 0 || stream.sequence.discontinuities > 0 || stream.clockChanges > 0 {
+                add("rtp.discontinuity", .warning, "RTP timing or sequence discontinuity",
+                    "Observed \(stream.timingResets) timing resets, \(stream.clockChanges) clock-rate changes and \(stream.sequence.discontinuities) sequence resets within this stream.",
+                    "Abrupt timing or sequence changes can disrupt receiver playout. A sender restart, clock change, or capture timestamp problem can cause these observations; they do not establish which occurred.",
+                    "Inspect the first discontinuity and surrounding RTP timestamps and sequence numbers. Compare sender restarts, codec changes and receiver jitter-buffer logs.", packet: stream.discontinuityPacket)
             }
         }
         return findings.sorted { $0.severity == $1.severity ? $0.evidence.id < $1.evidence.id : $0.severity.rawValue > $1.severity.rawValue }

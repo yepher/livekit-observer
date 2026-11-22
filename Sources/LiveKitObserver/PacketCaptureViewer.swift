@@ -196,7 +196,7 @@ struct PacketCaptureViewer: View {
                 case "Jitter": CaptureJitterView(model: analysis) { viewer.inspect($0) }
                 case "Expert Analysis":
                     CaptureFindingsView(findings: analysis.findings.filter { analysis.selectedCall.isEmpty || $0.callID == nil || $0.callID == analysis.selectedCall },
-                                        complete: result.complete, inspect: { viewer.inspect($0) }, jitter: { analysis.selectedStream = $0; tab = "Jitter" })
+                                        complete: result.complete, inspect: { viewer.inspect($0) }, jitter: { analysis.selectedStream = $0; analysis.jitterOverviewVisible = false; tab = "Jitter" })
                 default: CaptureFlowView(analysis: result, callID: analysis.selectedCall) { viewer.inspect($0) }
                 }
             } else {
