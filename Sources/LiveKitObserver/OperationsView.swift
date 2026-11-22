@@ -244,11 +244,14 @@ struct SimulationRerunView: View {
 struct RoomDetailView: View {
     let room: LiveRoom
     @Environment(AppModel.self) private var app
+    @State private var listening = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading) { Text(room.name).font(.title2.bold()); Text(room.id).font(.caption.monospaced()).textSelection(.enabled) }
                 Spacer()
+                Button { listening = true } label: { Label("Listen live", systemImage: "headphones") }
+                    .disabled(app.selectedProject == nil || app.cli == nil)
                 Button("Open session") { Task { await app.openRemoteSession(room.id) } }
             }
             if !room.metadata.isEmpty { DisclosureGroup("Room metadata") { Text(room.metadata).textSelection(.enabled) } }
@@ -275,6 +278,9 @@ struct RoomDetailView: View {
             }.disabled(app.operations.mutating)
             Text("Refreshes every 5 seconds while this room is visible.").font(.caption2).foregroundStyle(.secondary)
         }.padding().task { await app.operations.watchRoom() }
+        .sheet(isPresented: $listening) {
+            if let project = app.selectedProject { RoomListenView(project: project, target: room).id(project.id + room.id) }
+        }
     }
     private func confirm(_ title: String, participant: LiveParticipant, track: LiveParticipant.Track?) {
         guard let project = app.selectedProject else { return }

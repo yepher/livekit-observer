@@ -6,7 +6,6 @@ import SwiftUI
 
 @MainActor @Observable
 final class TalkSession {
-    private static var activeCall: UUID?
     private let identity = UUID()
     private let room = Room()
     private(set) var cli: LiveKitCLI?
@@ -25,9 +24,10 @@ final class TalkSession {
     var roomID: String? { createdRoom?.id }
 
     func start(cli: LiveKitCLI, projectURL: String, agent: String, roomName: String, metadata: String, input: String, output: String) async {
-        guard !connecting, !connected, Self.activeCall == nil else { message = "End the active Observer call before starting another."; return }
+        guard !connecting, !connected, !ending else { return }
         guard URL(string: projectURL)?.scheme == "wss", !roomName.isEmpty else { message = "A valid project URL and room name are required."; return }
-        Self.activeCall = identity; connecting = true; self.cli = cli; message = nil
+        guard ObserverAudioLease.shared.acquire(identity) else { message = "End the active Observer call or listener before starting another."; return }
+        connecting = true; self.cli = cli; message = nil
         defer { connecting = false }
         do {
             guard await AVCaptureDevice.requestAccess(for: .audio) else { throw InferenceClient.Failure(message: "Microphone access is disabled. Enable it for Observer in System Settings → Privacy & Security → Microphone.") }
@@ -83,7 +83,7 @@ final class TalkSession {
     }
     func end() async {
         guard !ending else { return }; ending = true
-        defer { ending = false; if Self.activeCall == identity { Self.activeCall = nil } }
+        defer { ending = false; ObserverAudioLease.shared.release(identity) }
         sampleTask?.cancel(); sampleTask = nil
         await room.disconnect(); connected = false; level = 0
         // End only the test room this call created. SID protects against a later room reusing its name.
