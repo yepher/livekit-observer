@@ -2,7 +2,8 @@
 build/
 DerivedData/
 .DS_Store
-docs
+/docs/*
+!/docs/guide.md
 
 .swiftpm/
 .build/
