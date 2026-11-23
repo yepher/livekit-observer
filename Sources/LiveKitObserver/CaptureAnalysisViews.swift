@@ -2,12 +2,11 @@ import ObserverCore
 import Charts
 import SwiftUI
 
-private struct FlowEvent: Identifiable {
-    var id: UInt64 { packet.id }
-    let packet: InspectedPacket
-    let label: String
-    let color: Color
-    var media = false
+private extension CaptureFlowEvent {
+    var color: Color {
+        if media { return .purple }
+        return status.map { $0 >= 400 ? .red : ($0 >= 200 ? .green : .orange) } ?? .blue
+    }
 }
 
 struct CaptureFlowView: View {
@@ -17,29 +16,8 @@ struct CaptureFlowView: View {
     @State private var page = 0
     @State private var showMedia = true
 
-    private var events: [FlowEvent] {
-        var rows = analysis.messages.filter { callID.isEmpty || $0.callID == callID }.map { message in
-            FlowEvent(packet: message.packet, label: message.label,
-                      color: message.status.map { $0 >= 400 ? .red : ($0 >= 200 ? .green : .orange) } ?? .blue)
-        }
-        if showMedia {
-            for stream in analysis.streams {
-                if !callID.isEmpty {
-                    let matches = analysis.messages.filter { message in
-                        message.id < stream.firstPacket.id && message.media.contains { $0.endpoint == stream.key.destination && $0.payloads.contains(stream.key.payloadType) }
-                    }
-                    guard Set(matches.map(\.callID)) == [callID] else { continue }
-                }
-                rows.append(FlowEvent(packet: stream.firstPacket,
-                                     label: "RTP starts · \(stream.clock?.codec ?? "PT \(stream.key.payloadType)") · SSRC \(String(stream.key.ssrc, radix: 16))",
-                                     color: .purple, media: true))
-            }
-        }
-        return rows.sorted { $0.id < $1.id }
-    }
-
     var body: some View {
-        let events = events
+        let events = CaptureFlowEvent.make(analysis, callID: callID, showMedia: showMedia)
         let rows = Array(events.dropFirst(page * 100).prefix(100))
         let endpoints = events.reduce(into: [String]()) { list, event in
             for endpoint in [event.packet.decoded.source, event.packet.decoded.destination] where !list.contains(endpoint) && list.count < 17 { list.append(endpoint) }
@@ -48,9 +26,9 @@ struct CaptureFlowView: View {
             HStack {
                 Text("Signaling bounce diagram").font(.headline)
                 Spacer()
-                Toggle("Media starts", isOn: $showMedia).toggleStyle(.checkbox)
+                Toggle("RTP streams", isOn: $showMedia).toggleStyle(.checkbox)
             }
-            Text("Capture order · Times relative to the first event · Select an arrow to inspect its packet. Media matches use advertised SDP endpoints; they do not prove call ownership.")
+            Text("One arrow per RTP stream, placed at its first packet · Times relative to the first event · Select an arrow to inspect its packet.")
                 .font(.caption).foregroundStyle(.secondary)
             if events.isEmpty {
                 ContentUnavailableView("No visible signaling", systemImage: "arrow.left.arrow.right",
@@ -59,8 +37,8 @@ struct CaptureFlowView: View {
                 Text("More than 16 endpoints. Choose a call to focus the diagram; all events remain available below.").font(.caption).foregroundStyle(.orange)
                 List(rows) { event in
                     Button { inspect(event.packet) } label: {
-                        HStack { Text("#\(event.id)"); Text(event.label).foregroundStyle(event.color); Spacer(); Text("\(event.packet.decoded.source) → \(event.packet.decoded.destination)") }
-                    }.buttonStyle(.plain)
+                        HStack { Text(event.packetLabel); Text(event.label).foregroundStyle(event.color); Spacer(); Text("\(event.packet.decoded.source) → \(event.packet.decoded.destination)") }
+                    }.buttonStyle(.plain).help(event.detail)
                 }
             } else {
                 ScrollView([.horizontal, .vertical]) {
@@ -82,7 +60,7 @@ struct CaptureFlowView: View {
                 .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
             }
             HStack {
-                Text("\(events.count.formatted()) events · Requests blue · Responses green/orange/red · RTP purple").font(.caption).foregroundStyle(.secondary)
+                Text("\(events.count.formatted()) entries · \(events.filter(\.media).count) RTP streams · Requests blue · Responses green/orange/red · RTP purple").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Previous") { page -= 1 }.disabled(page == 0)
                 Text("\(page + 1) / \(max(1, (events.count + 99) / 100))").font(.caption.monospacedDigit())
@@ -95,7 +73,7 @@ struct CaptureFlowView: View {
 }
 
 private struct BounceRow: View {
-    let event: FlowEvent
+    let event: CaptureFlowEvent
     let endpoints: [String]
     let origin: PacketTime?
     let inspect: () -> Void
@@ -108,7 +86,7 @@ private struct BounceRow: View {
             HStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(origin.flatMap { start in event.packet.time?.seconds(since: start) }.map { String(format: "%+.3f s", $0) } ?? "Unknown time")
-                    Text("Packet \(event.id)").foregroundStyle(.secondary)
+                    Text(event.packetLabel).foregroundStyle(.secondary)
                 }.font(.caption.monospacedDigit()).frame(width: 125, alignment: .leading)
                 ZStack(alignment: .topLeading) {
                     Canvas { context, size in
@@ -134,8 +112,8 @@ private struct BounceRow: View {
             }.contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("\(event.packet.decoded.source) → \(event.packet.decoded.destination) · \(event.label) · \(event.packet.time?.text ?? "Unknown time")")
-        .accessibilityLabel("Packet \(event.id), \(event.label), from \(event.packet.decoded.source) to \(event.packet.decoded.destination)")
+        .help(event.detail)
+        .accessibilityLabel("\(event.label), \(event.packetLabel), from \(event.packet.decoded.source) to \(event.packet.decoded.destination)")
     }
 }
 

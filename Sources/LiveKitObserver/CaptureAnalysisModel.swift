@@ -56,7 +56,7 @@ final class CaptureAnalysisModel {
                 } else if stream == nil {
                     self.result = result
                     self.selectedStream = result.streams.first?.key
-                    self.selectedCall = result.messages.first?.callID ?? ""
+                    self.selectedCall = ""
                 }
                 self.running = false; self.task = nil
                 if let analysis = self.result { self.jitterOverview = CaptureJitterOverview(analysis) }

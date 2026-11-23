@@ -17,6 +17,8 @@ struct SpectrogramView: View {
     @State private var hovering = false
     @State private var lanesWidth: CGFloat = 0
     @State private var scrollMonitor: Any?
+    @State private var showJitter = false
+    @State private var jitter = SpectrogramJitterModel()
     static let shortestSpan: TimeInterval = 2
     /// Space between recordings.
     private static let gap: CGFloat = 12
@@ -38,11 +40,16 @@ struct SpectrogramView: View {
             } else {
                 let window = window
                 let groups = ForEach(detail.sources) { source in
-                    SourceLanes(detail: detail, source: source, window: window, origin: origin, pinch: pinch.scale, anchor: pinch.anchor, canScroll: window != wholeWindow, scrollStart: $scrollStart)
+                    SourceLanes(detail: detail, source: source, window: window, origin: origin, pinch: pinch.scale, anchor: pinch.anchor, canScroll: window != wholeWindow, jitter: activeJitter, scrollStart: $scrollStart)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 Group {
-                    VStack(spacing: Self.gap) { groups }
+                    VStack(spacing: Self.gap) {
+                        groups
+                        if showJitter, !captures.isEmpty {
+                            SpectrogramJitterView(captures: captures, chart: jitter, lanes: audioLanes, wholeWindow: wholeWindow)
+                        }
+                    }
                 }
                 .onHover { hovering = $0 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { lanesWidth = $0 }
@@ -67,7 +74,7 @@ struct SpectrogramView: View {
             if model.storageConfigured, detail.row.recording == nil { model.scanRecordings(automatic: true) }
         }
         .onChange(of: model.player.currentTime) { old, new in follow(from: old, to: new) }
-        .onChange(of: detail.row.id) { scrollStart = nil }
+        .onChange(of: detail.row.id) { scrollStart = nil; showJitter = false; jitter = SpectrogramJitterModel() }
         .onAppear { startScrollMonitor() }
         .onDisappear { stopScrollMonitor() }
     }
@@ -133,8 +140,24 @@ struct SpectrogramView: View {
     private var controls: some View {
         HStack(alignment: .firstTextBaseline) {
             legend
+            if !captures.isEmpty {
+                Toggle("Show PCAP jitter", isOn: $showJitter).toggleStyle(.checkbox).font(.caption).fixedSize()
+            }
             Text(window == wholeWindow ? "Whole session" : Format.duration(window.upperBound.timeIntervalSince(window.lowerBound)) + " shown")
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
+        }
+    }
+
+    private var captures: [PacketCapture] { model.captures.captures(for: model.captureSession(for: detail.row)) }
+    private var activeJitter: SpectrogramJitterModel? {
+        showJitter && captures.contains { $0.id == jitter.captureID } ? jitter : nil
+    }
+    private var audioLanes: [CaptureAudioLane] {
+        detail.sources.flatMap { source -> [CaptureAudioLane] in
+            guard let spectrogram = detail.spectrograms[source.kind] else { return [] }
+            return spectrogram.channels.indices.map {
+                CaptureAudioLane(source: source, channel: $0, count: spectrogram.channels.count, identical: spectrogram.identicalChannels)
+            }
         }
     }
 
@@ -229,6 +252,7 @@ private struct SourceLanes: View {
     let pinch: CGFloat
     let anchor: CGFloat
     let canScroll: Bool
+    let jitter: SpectrogramJitterModel?
     @Binding var scrollStart: Date?
     @Environment(AppModel.self) private var model
 
@@ -249,6 +273,7 @@ private struct SourceLanes: View {
                 ForEach(0..<spectrogram.channels.count, id: \.self) { channel in
                     Lane(detail: detail, spectrogram: spectrogram, channel: channel, track: TrackID(kind: source.kind, channel: channel),
                          file: detail.channelFiles[source.kind].flatMap { $0.indices.contains(channel) ? $0[channel] : nil } ?? source.file, start: start, window: window, pinch: pinch, anchor: anchor, canScroll: canScroll, scrollStart: $scrollStart, label: source.channelName(channel, of: spectrogram.channels.count, identical: spectrogram.identicalChannels),
+                         jitterRows: jitter?.series(for: CaptureAudioLane(source: source, channel: channel, count: spectrogram.channels.count, identical: spectrogram.identicalChannels)) ?? [], jitterTimeline: jitter?.timeline,
                          ttsStatic: channel == source.agentChannel(channels: spectrogram.channels.count, identical: spectrogram.identicalChannels) ? detail.ttsStatic[source.kind] ?? [] : [])
                         .frame(minHeight: 60, maxHeight: .infinity)
                 }
@@ -316,6 +341,8 @@ private struct Lane: View {
     let canScroll: Bool
     @Binding var scrollStart: Date?
     let label: String
+    let jitterRows: [CaptureJitterOverview.Series]
+    let jitterTimeline: SpectrogramJitterTimeline?
     /// Possible static on this channel, outlined in red.
     var ttsStatic: [TTSStatic] = []
     @Environment(AppModel.self) private var model
@@ -355,6 +382,9 @@ private struct Lane: View {
                 FlagBands(flags: detail.flags, window: window, width: geo.size.width)
                 SuggestedBands(ranges: detail.suggestions, window: window, width: geo.size.width)
                 StaticBoxes(items: ttsStatic, window: window, width: geo.size.width)
+                if let jitterTimeline, !jitterRows.isEmpty {
+                    SpectrogramJitterOverlay(rows: jitterRows, timeline: jitterTimeline, window: window, pinch: pinch, anchor: anchor)
+                }
                 frequencyLabels(size: geo.size)
                 HStack(spacing: 4) {
                     Text(label).font(.caption.weight(.semibold)).foregroundStyle(.white)
@@ -467,7 +497,7 @@ private struct Playhead: View {
 }
 
 /// Time labels relative to the session, with a tick where each agent (blue) or user (green) turn begins.
-private struct TimeAxis: View {
+struct TimeAxis: View {
     let window: ClosedRange<Date>
     let origin: Date?
     let transcript: [TranscriptItem]

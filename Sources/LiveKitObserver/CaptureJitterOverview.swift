@@ -27,47 +27,22 @@ struct CaptureJitterOverview: Sendable {
         Array(series.dropFirst(max(0, min(index, pageCount - 1)) * Self.pageSize).prefix(Self.pageSize))
     }
 
-    init(_ analysis: CaptureAnalysis) {
+    init(_ analysis: CaptureAnalysis, maximumPoints: Int = Self.maximumPoints) {
+        let maximumPoints = min(513, max(1, maximumPoints))
         let streams = analysis.streams.sorted { $0.firstPacket.id < $1.firstPacket.id }
         let origin = ([analysis.firstTime] + streams.map(\.chartStart)).compactMap { $0 }.first { $0.seconds(since: $0) != nil }
         self.origin = origin
         var low = 0.0, high = 0.0
         var rows: [Series] = []
 
-        // Resolve only endpoints present in this capture's bounded stream list, in packet order.
-        // Reused/ambiguous SDP endpoints stay ambiguous rather than guessing call ownership.
-        struct Endpoint: Hashable { let address: String; let payload: UInt8 }
-        enum Association { case call(String), ambiguous }
-        let wanted = streams.reduce(into: [String: Set<UInt8>]()) { $0[$1.key.destination, default: []].insert($1.key.payloadType) }
-        var associations: [Endpoint: Association] = [:]
-        let messages = analysis.messages.sorted { $0.id < $1.id }
-        var nextMessage = 0
+        let matches = CaptureMediaCallMatch.resolve(analysis)
         for (index, stream) in streams.enumerated() {
-            while nextMessage < messages.count, messages[nextMessage].id < stream.firstPacket.id {
-                let message = messages[nextMessage]
-                for media in message.media {
-                    for payload in (wanted[media.endpoint] ?? []).intersection(media.payloads) {
-                        let endpoint = Endpoint(address: media.endpoint, payload: payload)
-                        switch associations[endpoint] {
-                        case .none: associations[endpoint] = .call(message.callID)
-                        case .call(let previous) where previous != message.callID: associations[endpoint] = .ambiguous
-                        default: break
-                        }
-                    }
-                }
-                nextMessage += 1
-            }
-            let call: String
-            switch associations[Endpoint(address: stream.key.destination, payload: stream.key.payloadType)] {
-            case .call(let id): call = "SDP match: \(id)"
-            case .ambiguous: call = "Multiple possible calls"
-            case .none: call = "No matching call signaling"
-            }
+            let call = (matches[stream.key] ?? .unmatched).label
             let offset = origin.flatMap { origin in stream.chartStart?.seconds(since: origin) }
             let chart = stream.chart
             var points: [JitterBucket] = []
             if let offset, offset.isFinite {
-                let step = max(1, (chart.count + Self.maximumPoints - 1) / Self.maximumPoints)
+                let step = max(1, (chart.count + maximumPoints - 1) / maximumPoints)
                 for start in stride(from: 0, to: chart.count, by: step) {
                     var bucket = chart[start]
                     for index in (start + 1)..<min(start + step, chart.count) { bucket.merge(chart[index]) }

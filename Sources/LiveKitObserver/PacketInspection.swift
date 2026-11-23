@@ -17,6 +17,13 @@ struct PacketTime: Sendable, Equatable {
             - Double(other.ticks % other.unitsPerSecond) / Double(other.unitsPerSecond)
     }
 
+    /// Absolute capture time, including PCAPNG interface resolution and timestamp offset.
+    var date: Date? {
+        guard let seconds = seconds(since: PacketTime(ticks: 0, unitsPerSecond: 1)),
+              seconds >= -62_135_596_800, seconds < 253_402_300_800 else { return nil }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
     var text: String {
         guard unitsPerSecond > 0 else { return "Unknown timestamp resolution" }
         let whole = ticks / unitsPerSecond

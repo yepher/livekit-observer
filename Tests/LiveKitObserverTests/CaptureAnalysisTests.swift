@@ -216,6 +216,26 @@ private enum AnalysisWire {
         #expect(viewer.contents?.decoded.rtp?.sequence == 2)
     }
 
+    @Test @MainActor func openingACaptureDefaultsToAllCallsAndStreams() async throws {
+        let f = try InspectionFixture(AnalysisWire.capture([
+            (0, AnalysisWire.sip("INVITE sip:b@example.com SIP/2.0", cseq: "1 INVITE")),
+            (1, AnalysisWire.rtp(1, 0)), (1.04, AnalysisWire.rtp(2, 160))
+        ]))
+        defer { f.cleanup() }
+        let store = AttachmentStore(root: f.directory.appendingPathComponent("attachments"))
+        let capture = try await store.importFile(f.file, session: f.session, limit: 1_000_000)
+        let model = CaptureAnalysisModel(capture: capture, store: store)
+        model.start()
+        let deadline = ContinuousClock.now + .seconds(5)
+        while model.running {
+            try #require(ContinuousClock.now < deadline)
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let result = try #require(model.result)
+        #expect(result.calls == ["example"] && model.selectedCall.isEmpty)
+        #expect(CaptureFlowEvent.make(result, callID: model.selectedCall).filter(\.media).count == 1)
+    }
+
     @Test func unlimitedNGSectionsCannotGrowClockHistoryWithoutBound() throws {
         var bytes = Data()
         for _ in 0..<257 { bytes += Wire.section() + Wire.interface() + Wire.enhanced(Data([1, 2, 3, 4])) }
