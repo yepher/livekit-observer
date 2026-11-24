@@ -217,25 +217,89 @@ struct WebRTCChart: View {
     let metric: WebRTCMetric
     /// The connection's time span, so charts of the same connection line up.
     var span: ClosedRange<Date>?
+
+    /// A run of consecutive points drawn in one colour; neighbouring runs share their boundary point.
+    struct Run: Identifiable { let id: Int; let level: WebRTCQuality.Level?; let points: [WebRTCMetric.Point] }
+
     var body: some View {
         let points = Self.thin(metric.points, to: 600)
+        let quality = metric.quality
+        let upper = Self.upper(points, quality)
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
                 Text(metric.name).font(.callout.bold())
+                if let quality { Text(quality.legend + (metric.unit.isEmpty ? "" : " " + metric.unit)).font(.caption2).foregroundStyle(.tertiary) }
                 Spacer()
                 if let median = metric.median, let peak = metric.maximum {
-                    Text("median \(Self.format(median)) · peak \(Self.format(peak)) \(metric.unit)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    HStack(spacing: 0) {
+                        Text("median ")
+                        Text(Self.format(median)).foregroundStyle(quality == nil ? Color.secondary : Self.color(quality?.level(median)))
+                        Text(" · \(quality?.higherIsWorse == false ? "low" : "peak") ")
+                        let extreme = quality?.higherIsWorse == false ? (metric.values.min() ?? peak) : peak
+                        Text(Self.format(extreme)).foregroundStyle(quality == nil ? Color.secondary : Self.color(quality?.level(extreme)))
+                        Text(" " + metric.unit)
+                    }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
             }
-            Chart(points) { point in
-                LineMark(x: .value("Time", point.time), y: .value(metric.name, point.value)).interpolationMethod(.linear)
+            Chart {
+                if let quality {
+                    ForEach(Self.zones(quality, upper: upper), id: \.0) { level, low, high in
+                        RectangleMark(yStart: .value("from", low), yEnd: .value("to", high)).foregroundStyle(Self.color(level).opacity(0.12))
+                    }
+                }
+                ForEach(Self.runs(points, quality)) { run in
+                    ForEach(run.points) { point in
+                        LineMark(x: .value("Time", point.time), y: .value(metric.name, point.value), series: .value("Run", run.id))
+                            .interpolationMethod(.linear).foregroundStyle(Self.color(run.level))
+                    }
+                }
             }
             .chartXScale(domain: span ?? (points.first?.time ?? .now)...(points.last?.time ?? .now))
+            .chartYScale(domain: 0...upper)
             .chartYAxisLabel(metric.unit)
             .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) { AxisGridLine(); AxisValueLabel(format: .dateTime.hour().minute().second()) } }
             .frame(height: 110)
         }
     }
+
+    static func color(_ level: WebRTCQuality.Level?) -> Color {
+        switch level { case .good: .green; case .fair: .orange; case .poor: .red; case nil: .blue }
+    }
+
+    /// Room for the data, and for the poor limit so the zones are visible even on a quiet chart.
+    static func upper(_ points: [WebRTCMetric.Point], _ quality: WebRTCQuality?) -> Double {
+        let peak = points.map(\.value).max() ?? 0
+        let floor = quality.map { $0.higherIsWorse ? $0.poor * 1.2 : $0.fair * 1.2 } ?? 0
+        let value = max(peak * 1.05, floor, 0.0001)
+        let magnitude = pow(10, floor10(value))
+        return (value / magnitude).rounded(.up) * magnitude
+    }
+    private static func floor10(_ value: Double) -> Double { Foundation.floor(log10(value)) }
+
+    static func zones(_ quality: WebRTCQuality, upper: Double) -> [(WebRTCQuality.Level, Double, Double)] {
+        let raw: [(WebRTCQuality.Level, Double, Double)] = quality.higherIsWorse
+            ? [(.good, 0, quality.fair), (.fair, quality.fair, quality.poor), (.poor, quality.poor, upper)]
+            : [(.poor, 0, quality.poor), (.fair, quality.poor, quality.fair), (.good, quality.fair, upper)]
+        return raw.map { ($0.0, min($0.1, upper), min($0.2, upper)) }.filter { $0.2 > $0.1 }
+    }
+
+    /// Splits the line where its quality changes; each segment takes the worse level of its two ends.
+    static func runs(_ points: [WebRTCMetric.Point], _ quality: WebRTCQuality?) -> [Run] {
+        guard let quality, points.count > 1 else { return [Run(id: 0, level: nil, points: points)] }
+        var runs: [Run] = []
+        var current: [WebRTCMetric.Point] = [points[0]]
+        var level: WebRTCQuality.Level?
+        for (a, b) in zip(points, points.dropFirst()) {
+            let segment = max(quality.level(a.value), quality.level(b.value))
+            if let level, segment != level {
+                runs.append(Run(id: runs.count, level: level, points: current)); current = [a]
+            }
+            level = segment; current.append(b)
+        }
+        runs.append(Run(id: runs.count, level: level, points: current))
+        return runs
+    }
+
     static func format(_ value: Double) -> String { value >= 100 ? String(format: "%.0f", value) : value >= 10 ? String(format: "%.1f", value) : String(format: "%.2f", value) }
     /// Keeps charts responsive for long dumps by taking every nth point.
     static func thin(_ points: [WebRTCMetric.Point], to limit: Int) -> [WebRTCMetric.Point] {
@@ -323,10 +387,10 @@ struct WebRTCStatsBrowser: View {
                 List(reports, selection: $report) { report in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(report.type).font(.callout)
-                        Text(report.id).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        Text(report.id).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }.tag(report.id)
                 }
-            }.frame(minWidth: 220, idealWidth: 260, maxWidth: 360)
+            }.frame(minWidth: 220, idealWidth: 260, maxWidth: 360, maxHeight: .infinity)
             if let current = report.flatMap({ connection.reports[$0] }) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("\(current.type) · \(current.id)").font(.headline).textSelection(.enabled)
@@ -342,10 +406,19 @@ struct WebRTCStatsBrowser: View {
                             if (series?.numbers.count ?? 0) > 1 { Image(systemName: "chart.xyaxis.line").foregroundStyle(.tertiary).help("Select to chart") }
                         }.tag(name)
                     }
-                }.padding(.leading, 8).frame(minWidth: 400)
+                }.padding(.leading, 8).frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
-                ContentUnavailableView("Choose a stats object", systemImage: "list.bullet.rectangle", description: Text("Select a property with a chart icon to plot it.")).frame(minWidth: 400)
+                ContentUnavailableView("Choose a stats object", systemImage: "list.bullet.rectangle", description: Text("Pick one on the left to see its properties, then select a property with a chart icon to plot it."))
+                    .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            // Start on the most useful object: received media, then sent media, then the first.
+            guard report == nil else { return }
+            let all = reports
+            report = (all.first { $0.type == "inbound-rtp" } ?? all.first { $0.type == "outbound-rtp" } ?? all.first)?.id
+        }
+        .onChange(of: report) { property = nil }
     }
 }

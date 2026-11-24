@@ -34,6 +34,39 @@ struct WebRTCMetric: Identifiable, Sendable {
     }
     /// The highest-value point, for pointing at the worst moment.
     var worst: Point? { points.max { $0.value < $1.value } }
+    var quality: WebRTCQuality? { WebRTCQuality.for(name) }
+}
+
+/// Good / fair / poor limits for a metric, kept in line with the Findings rules.
+struct WebRTCQuality: Sendable, Equatable {
+    enum Level: Int, Sendable, Comparable { case good, fair, poor; static func < (a: Level, b: Level) -> Bool { a.rawValue < b.rawValue } }
+    /// Values beyond `fair` are fair, beyond `poor` are poor (in the bad direction).
+    let fair: Double
+    let poor: Double
+    /// True when larger values are worse (loss, jitter); false when smaller are worse (bandwidth, frame rate).
+    let higherIsWorse: Bool
+
+    func level(_ value: Double) -> Level {
+        higherIsWorse ? (value > poor ? .poor : value > fair ? .fair : .good) : (value < poor ? .poor : value < fair ? .fair : .good)
+    }
+    var legend: String {
+        let f = WebRTCQuality.format
+        return higherIsWorse ? "good ≤ \(f(fair)) · fair ≤ \(f(poor)) · poor > \(f(poor))" : "good ≥ \(f(fair)) · fair ≥ \(f(poor)) · poor < \(f(poor))"
+    }
+    private static func format(_ value: Double) -> String { value == value.rounded() ? String(Int(value)) : String(format: "%g", value) }
+
+    static func `for`(_ metric: String) -> WebRTCQuality? {
+        switch metric {
+        case "Packet loss", "Loss at receiver": .init(fair: 1, poor: 5, higherIsWorse: true)
+        case "Jitter", "Jitter at receiver": .init(fair: 30, poor: 50, higherIsWorse: true)
+        case "Jitter buffer delay": .init(fair: 100, poor: 250, higherIsWorse: true)
+        case "Concealment": .init(fair: 2, poor: 10, higherIsWorse: true)
+        case "Round trip", "Round trip (RTCP)": .init(fair: 150, poor: 300, higherIsWorse: true)
+        case "Available send bandwidth": .init(fair: 200, poor: 100, higherIsWorse: false)
+        case "Frame rate": .init(fair: 24, poor: 15, higherIsWorse: false)
+        default: nil
+        }
+    }
 }
 
 struct WebRTCStream: Identifiable, Sendable {

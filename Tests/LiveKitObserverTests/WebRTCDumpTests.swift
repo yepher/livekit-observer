@@ -158,4 +158,19 @@ private func sampleConnection() -> [String: Any] {
             try WebRTCExpert.parse(#"{"summary":"x","causes":[{"title":"t","explanation":"e","evidenceIDs":["made-up"]}]}"#, evidence: evidence)
         }
     }
+
+    @Test func chartsColourValuesByQuality() throws {
+        let jitter = try #require(WebRTCQuality.for("Jitter"))
+        #expect(jitter.level(10) == .good && jitter.level(40) == .fair && jitter.level(80) == .poor)
+        let bandwidth = try #require(WebRTCQuality.for("Available send bandwidth"))
+        #expect(bandwidth.level(500) == .good && bandwidth.level(150) == .fair && bandwidth.level(50) == .poor)
+        #expect(WebRTCQuality.for("Bitrate") == nil)
+        let start = Date(timeIntervalSince1970: 0)
+        let points = [10, 12, 60, 70, 20, 15].enumerated().map { WebRTCMetric.Point(time: start.addingTimeInterval(Double($0.offset)), value: Double($0.element)) }
+        let runs = WebRTCChart.runs(points, jitter)
+        #expect(runs.map(\.level) == [.good, .poor, .good])
+        // Runs share their boundary points so the line stays continuous.
+        #expect(runs.map(\.points.count) == [2, 4, 2])
+        #expect(WebRTCChart.upper(points, jitter) >= 70 && WebRTCChart.upper([points[0]], jitter) >= 60)
+    }
 }

@@ -116,6 +116,20 @@ How the browser reached LiveKit:
 
 Charts for each audio and video stream, all on the same time axis, so a spike in one lines up with the others.
 
+Charts with a known good range are coloured: the line is green where the value is good, orange where it's fair, and red where it's poor, over matching shaded zones. The limits are shown next to each chart's title and match the Findings rules:
+
+| Metric | Good | Fair | Poor |
+| --- | --- | --- | --- |
+| Packet loss, loss at receiver | ≤ 1% | ≤ 5% | > 5% |
+| Jitter, jitter at receiver | ≤ 30 ms | ≤ 50 ms | > 50 ms |
+| Jitter buffer delay | ≤ 100 ms | ≤ 250 ms | > 250 ms |
+| Concealment | ≤ 2% | ≤ 10% | > 10% |
+| Round trip | ≤ 150 ms | ≤ 300 ms | > 300 ms |
+| Available send bandwidth | ≥ 200 kbps | ≥ 100 kbps | < 100 kbps |
+| Frame rate | ≥ 24 fps | ≥ 15 fps | < 15 fps |
+
+Bitrate, audio level and resolution have no fixed good range, so they stay blue.
+
 - **Received audio** (subscriber): bitrate, packet loss, jitter, jitter buffer delay, concealment, and audio level.
 - **Sent audio** (publisher): bitrate, the microphone level, and the loss, jitter, and round trip the server reported back.
 - **Video:** frame rate and resolution, plus freezes and quality limits.
