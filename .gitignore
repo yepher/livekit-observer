@@ -7,3 +7,6 @@ DerivedData/
 
 .swiftpm/
 .build/
+
+# Not part of this project
+TestCamera.app/
