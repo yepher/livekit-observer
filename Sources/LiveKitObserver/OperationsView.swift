@@ -70,7 +70,7 @@ struct OperationsDetailView: View {
             }
         }
         .sheet(item: $ops.confirmation) { request in
-            OperationConfirmationView(request: request) { Task { await ops.perform(request, section: section) } }
+            OperationConfirmationView(request: request) { values in Task { await ops.perform(request, section: section, values: values) } }
         }
         .sheet(item: $ops.rerun) { request in
             SimulationRerunView(request: request) { ops.startRerun(request) }
@@ -241,70 +241,36 @@ struct SimulationRerunView: View {
     }
 }
 
-struct RoomDetailView: View {
-    let room: LiveRoom
-    @Environment(AppModel.self) private var app
-    @State private var listening = false
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading) { Text(room.name).font(.title2.bold()); Text(room.id).font(.caption.monospaced()).textSelection(.enabled) }
-                Spacer()
-                Button { listening = true } label: { Label("Listen live", systemImage: "headphones") }
-                    .disabled(app.selectedProject == nil || app.cli == nil)
-                Button("Open session") { Task { await app.openRemoteSession(room.id) } }
-            }
-            if !room.metadata.isEmpty { DisclosureGroup("Room metadata") { Text(room.metadata).textSelection(.enabled) } }
-            if let error = app.operations.detailError { Text(error).foregroundStyle(.orange).font(.caption).textSelection(.enabled) }
-            List(app.operations.participants) { participant in
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text(participant.name.isEmpty ? participant.identity : participant.name).font(.headline)
-                        Text(participant.kind).font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Remove…") { confirm("Remove participant", participant: participant, track: nil) }
-                    }
-                    Text(participant.identity).font(.caption.monospaced()).textSelection(.enabled)
-                    if let date = participant.joinedAt { Text("Joined \(date.formatted())").font(.caption).foregroundStyle(.secondary) }
-                    ForEach(participant.tracks) { track in
-                        HStack {
-                            Label("\(track.name.isEmpty ? track.type : track.name) · \(track.id)", systemImage: track.muted ? "mic.slash" : "waveform")
-                            Spacer()
-                            if !track.muted { Button("Mute…") { confirm("Mute track", participant: participant, track: track) } }
-                        }.font(.caption)
-                    }
-                    if !participant.metadata.isEmpty { DisclosureGroup("Metadata") { Text(participant.metadata).textSelection(.enabled) }.font(.caption) }
-                }.padding(.vertical, 8)
-            }.disabled(app.operations.mutating)
-            Text("Refreshes every 5 seconds while this room is visible.").font(.caption2).foregroundStyle(.secondary)
-        }.padding().task { await app.operations.watchRoom() }
-        .sheet(isPresented: $listening) {
-            if let project = app.selectedProject { RoomListenView(project: project, target: room).id(project.id + room.id) }
-        }
-    }
-    private func confirm(_ title: String, participant: LiveParticipant, track: LiveParticipant.Track?) {
-        guard let project = app.selectedProject else { return }
-        let arguments = track.map { ["room", "mute-track", "--room", room.name, "--identity", participant.identity, "--mute", $0.id] }
-            ?? ["room", "participants", "remove", "--room", room.name, "--identity", participant.identity]
-        app.operations.confirm(title, explanation: "Room: \(room.name)\nParticipant: \(participant.identity)" + (track.map { "\nTrack: \($0.id)" } ?? "\nThe participant will be disconnected."), arguments: arguments, project: project)
-    }
-}
-
 struct OperationConfirmationView: View {
     let request: OperationConfirmation
-    let perform: () -> Void
+    let perform: ([String]) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var typedName = ""
+    @State private var fields: [OperationConfirmation.Field] = []
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(request.title).font(.title2.bold())
             Text("Project: \(request.projectName) (\(request.projectID))").font(.headline)
             Text(request.explanation).textSelection(.enabled)
+            ForEach($fields) { $field in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(field.label + (field.optional ? " (optional)" : "")).font(.caption).foregroundStyle(.secondary)
+                    if field.multiline {
+                        TextEditor(text: $field.text).font(.body.monospaced()).frame(minHeight: 90, maxHeight: 220)
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(.separator))
+                    } else {
+                        TextField(field.label, text: $field.text).font(.body.monospaced()).labelsHidden()
+                    }
+                    if let problem = field.problem, !(field.text.isEmpty && !field.optional) { Text(problem).font(.caption).foregroundStyle(.orange) }
+                }
+            }
             if request.protected { TextField("Type \(request.projectName) to confirm", text: $typedName) }
             HStack {
                 Spacer(); Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(request.title, role: .destructive) { dismiss(); perform() }.disabled(request.protected && typedName != request.projectName)
+                Button(request.title, role: .destructive) { let values = fields.map(\.text); dismiss(); perform(values) }
+                    .disabled((request.protected && typedName != request.projectName) || fields.contains { $0.problem != nil })
             }
-        }.padding(24).frame(width: 480)
+        }.padding(24).frame(width: request.fields.isEmpty ? 480 : 560)
+        .onAppear { if fields.isEmpty { fields = request.fields } }
     }
 }

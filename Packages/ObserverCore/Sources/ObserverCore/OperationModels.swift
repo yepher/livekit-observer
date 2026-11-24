@@ -90,33 +90,69 @@ public struct SimulationRun: Identifiable, Sendable {
 public struct LiveRoom: Identifiable, Sendable {
     public let id: String, name: String, metadata: String
     public let participants: Int, createdAt: Date?
+    public let publishers: Int, maxParticipants: Int
+    public let emptyTimeout: Int, departureTimeout: Int
+    public let recording: Bool
+    public let codecs: [String]
+    /// The CLI's room record, without the TURN password.
+    public let raw: JSONValue
     public init?(json: JSONValue) {
         guard !json.text("sid").isEmpty else { return nil }; id = json.text("sid")
         name = json.text("name"); metadata = json.text("metadata")
         participants = Int(json.field("numParticipants")?.double ?? 0)
         createdAt = json.field("creationTime")?.double.map { Date(timeIntervalSince1970: $0) }
+        publishers = Int(json.field("numPublishers")?.double ?? 0)
+        maxParticipants = Int(json.field("maxParticipants")?.double ?? 0)
+        emptyTimeout = Int(json.field("emptyTimeout")?.double ?? 0)
+        departureTimeout = Int(json.field("departureTimeout")?.double ?? 0)
+        recording = json.field("activeRecording")?.bool ?? false
+        codecs = (json.field("enabledCodecs")?.array ?? []).compactMap { $0.field("mime")?.string }
+        var object = json.object ?? [:]
+        object["turnPassword"] = nil; object["turn_password"] = nil
+        raw = .object(object)
     }
 }
-
 public struct LiveParticipant: Identifiable, Sendable {
     public struct Track: Identifiable, Sendable {
         public let id: String, name: String, type: String
         public let muted: Bool
+        public let source: String, mimeType: String
+        public let simulcast: Bool
+        public let width: Int, height: Int
         public init?(_ json: JSONValue) {
             guard !json.text("sid").isEmpty else { return nil }; id = json.text("sid")
             name = json.text("name"); type = json.text("type"); muted = json["muted"]?.bool ?? false
+            source = json.text("source"); mimeType = json.text("mimeType")
+            simulcast = json.field("simulcast")?.bool ?? false
+            width = Int(json.field("width")?.double ?? 0); height = Int(json.field("height")?.double ?? 0)
+        }
+        /// "audio/opus · microphone", or the track type when the CLI leaves those out.
+        public var summary: String {
+            let parts = [mimeType, source.lowercased().replacingOccurrences(of: "_", with: " ")].filter { !$0.isEmpty }
+            return parts.isEmpty ? type.lowercased() : parts.joined(separator: " · ")
         }
     }
     public let id: String, identity: String, name: String, kind: String, metadata: String
     public let joinedAt: Date?
     public let tracks: [Track]
+    public let state: String, region: String, version: Int
+    public let attributes: [String: String]
+    /// Grants that are on, such as "canPublish", in the CLI's order.
+    public let permissions: [String]
+    public let raw: JSONValue
     public init?(json: JSONValue) {
         guard !json.text("identity").isEmpty else { return nil }
         identity = json.text("identity"); id = json.text("sid").isEmpty ? identity : json.text("sid")
         name = json.text("name"); kind = json.text("kind").isEmpty ? "STANDARD" : json.text("kind")
         metadata = json.text("metadata"); joinedAt = json.field("joinedAt")?.double.map { Date(timeIntervalSince1970: $0) }
         tracks = (json["tracks"]?.array ?? []).compactMap(Track.init)
+        state = json.text("state"); region = json.text("region"); version = Int(json.field("version")?.double ?? 0)
+        attributes = (json.field("attributes")?.object ?? [:]).compactMapValues(\.string)
+        permissions = (json.field("permission")?.object ?? [:]).filter { $0.value.bool == true }.map(\.key).sorted()
+        raw = json
     }
+    /// The agent's state attribute (listening, thinking, speaking), set by LiveKit Agents.
+    public var agentState: String? { attributes["lk.agent.state"] }
 
     /// lk 2.19.4 prints `identity (STATE)\t tracks: N`, not JSON. Match the suffix,
     /// so spaces and parentheses inside an identity are retained. Refuse malformed output.

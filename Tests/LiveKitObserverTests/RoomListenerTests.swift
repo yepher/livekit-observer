@@ -8,7 +8,7 @@ private func listenRoom(_ id: String = "RM_live") -> LiveRoom {
 
 /// Unsigned test fixtures are only used with the fake connection below.
 private func listenToken(room: String, identity: String, overrides: [String: JSONValue] = [:]) throws -> String {
-    var grant: [String: JSONValue] = ["room": .string(room), "roomJoin": .bool(true), "canSubscribe": .bool(true), "canPublish": .bool(false), "canPublishData": .bool(false)]
+    var grant: [String: JSONValue] = ["room": .string(room), "roomJoin": .bool(true), "canSubscribe": .bool(true), "canPublish": .bool(false), "canPublishData": .bool(true)]
     grant.merge(overrides, uniquingKeysWith: { _, value in value })
     let data = try JSONSerialization.data(withJSONObject: JSONValue.object(["sub": .string(identity), "video": .object(grant)]).foundation)
     return "header." + data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "") + ".signature"
@@ -48,6 +48,13 @@ private actor FakeListenSource: RoomListenSource {
     func refresh(volume: Double, output: String) async throws -> RoomListenSnapshot {
         receivedVolumes.append(volume); receivedOutputs.append(output); return next
     }
+    var rpcCalls: [(String, String, String)] = []
+    var rpcFailure: Error?
+    func performRpc(to identity: String, method: String, payload: String, timeout: TimeInterval) async throws -> String {
+        rpcCalls.append((identity, method, payload))
+        if let rpcFailure { throw rpcFailure }
+        return #"{"ok":true}"#
+    }
     func disconnect() async { disconnectCount += 1 }
 }
 
@@ -57,7 +64,7 @@ private actor FakeListenSource: RoomListenSource {
         try RoomListenToken.validate(token, room: "existing-room", identity: "listener")
         #expect(throws: (any Error).self) { try RoomListenToken.validate(token, room: "another-room", identity: "listener") }
         #expect(throws: (any Error).self) { try RoomListenToken.validate(token, room: "existing-room", identity: "another-listener") }
-        for overrides: [String: JSONValue] in [["canPublish": .bool(true)], ["canPublish": .null], ["canPublishData": .bool(true)], ["canPublishData": .null], ["canSubscribe": .bool(false)], ["roomAdmin": .bool(true)], ["roomCreate": .bool(true)], ["hidden": .bool(true)]] {
+        for overrides: [String: JSONValue] in [["canPublish": .bool(true)], ["canPublish": .null], ["canPublishData": .bool(false)], ["canPublishData": .null], ["canSubscribe": .bool(false)], ["roomAdmin": .bool(true)], ["roomCreate": .bool(true)], ["hidden": .bool(true)]] {
             let unsafe = try listenToken(room: "existing-room", identity: "listener", overrides: overrides)
             #expect(throws: (any Error).self) { try RoomListenToken.validate(unsafe, room: "existing-room", identity: "listener") }
         }
@@ -139,5 +146,71 @@ private actor FakeListenSource: RoomListenSource {
         #expect(session.phase == .idle && session.message == "Room ended")
         #expect(connection.disconnectCount == 1)
         let owner = UUID(); #expect(lease.acquire(owner)); lease.release(owner)
+    }
+}
+
+@Suite @MainActor struct RoomMonitorTests {
+    @Test func captionsReplaceTheirTextAndTheLogKeepsTheNewestEvents() {
+        let log = RoomMonitorLog()
+        log.caption(id: "SG_1", speaker: "user", agent: false, text: "hel", final: false, open: true)
+        log.caption(id: "SG_1", speaker: "user", agent: false, text: "hello there", final: true, open: false)
+        log.caption(id: "SG_2", speaker: "agent", agent: true, text: "", final: false, open: false)
+        #expect(log.captions.map(\.text) == ["hello there"])
+        #expect(log.captions.first?.final == true && log.captions.first?.open == false)
+        for index in 0..<(RoomMonitorLog.limit + 3) { log.record(RoomMonitorEvent(.info, .data, "event \(index)")) }
+        #expect(log.events.count == RoomMonitorLog.limit && log.dropped == 3)
+        #expect(log.events.first?.message == "event 3")
+        let exported = try? JSONSerialization.jsonObject(with: log.export()) as? [String: Any]
+        #expect((exported?["events"] as? [Any])?.count == RoomMonitorLog.limit)
+        log.clear(); #expect(log.events.isEmpty && log.captions.isEmpty && log.dropped == 0)
+    }
+
+    @Test func attributeChangesAndPayloadsReadClearly() {
+        #expect(RoomMonitorText.changes(from: ["lk.agent.state": "listening", "gone": "1"], to: ["lk.agent.state": "thinking", "new": "x"])
+                == ["gone: removed", "lk.agent.state: listening → thinking", "new: x"])
+        #expect(RoomMonitorText.payload(Data(#"{"b":1,"a":2}"#.utf8)).contains("\"a\" : 2"))
+        #expect(RoomMonitorText.payload(Data("plain".utf8)) == "plain")
+        #expect(RoomMonitorText.payload(Data([0xff, 0xfe])).hasPrefix("2 bytes of binary data"))
+    }
+
+    @Test func roomAndParticipantRecordsKeepTheirDetailsButNotTheTurnPassword() throws {
+        let room = try #require(LiveRoom(json: JSONValue(any: ["sid": "RM_1", "name": "r", "numPublishers": 2, "turnPassword": "secret", "activeRecording": true,
+                                                               "enabledCodecs": [["mime": "audio/opus"]]])))
+        #expect(room.publishers == 2 && room.recording && room.codecs == ["audio/opus"])
+        #expect(room.raw["turnPassword"] == nil)
+        let participant = try #require(LiveParticipant(json: JSONValue(any: [
+            "identity": "agent-1", "kind": "AGENT", "state": "ACTIVE", "region": "us-east",
+            "attributes": ["lk.agent.state": "speaking"], "permission": ["canPublish": true, "canSubscribe": true, "hidden": false],
+            "tracks": [["sid": "TR_1", "type": "AUDIO", "source": "MICROPHONE", "mimeType": "audio/opus"]]])))
+        #expect(participant.agentState == "speaking")
+        #expect(participant.permissions == ["canPublish", "canSubscribe"])
+        #expect(participant.tracks.first?.summary == "audio/opus · microphone")
+    }
+
+    @Test func confirmationFieldsCheckWhatTheUserTyped() {
+        typealias Field = OperationConfirmation.Field
+        #expect(Field(label: "Permissions", text: #"{"canPublish":false}"#, check: .jsonObject).problem == nil)
+        #expect(Field(label: "Permissions", text: "[1]", check: .jsonObject).problem != nil)
+        #expect(Field(label: "Data", text: "--room other", check: .notFlag).problem != nil)
+        #expect(Field(label: "Topic", text: "", check: .notFlag, optional: true).problem == nil)
+        #expect(Field(label: "Data", text: "").problem != nil)
+        let request = OperationConfirmation(projectID: "p", projectName: "P", title: "Send", explanation: "", protected: false, arguments: [],
+                                            fields: [Field(label: "Data", text: "x")], build: { ["room", "send-data", $0[0]] })
+        #expect(request.arguments(for: ["hello"]) == ["room", "send-data", "hello"])
+    }
+
+    @Test func rpcCallsNeedTheRoomAndAreLogged() async throws {
+        let connection = FakeListenConnection(), session = RoomListenSession(connection: connection, lease: ObserverAudioLease())
+        await #expect(throws: (any Error).self) { try await session.performRpc(to: "agent", method: "ping", payload: "") }
+        #expect(connection.rpcCalls.isEmpty)
+        await session.start(source: FakeListenSource(), projectURL: "wss://example.invalid", target: listenRoom())
+        let answer = try await session.performRpc(to: "agent", method: "ping", payload: "{}")
+        #expect(answer == #"{"ok":true}"# && connection.rpcCalls.first?.1 == "ping")
+        connection.rpcFailure = URLError(.timedOut)
+        await #expect(throws: (any Error).self) { try await session.performRpc(to: "agent", method: "slow", payload: "") }
+        let rpc = session.log.events.filter { $0.category == .rpc }
+        #expect(rpc.map(\.level) == [.info, .info, .info, .error])
+        await session.stop()
+        #expect(session.log.events.last?.message == "Observer left the room")
     }
 }

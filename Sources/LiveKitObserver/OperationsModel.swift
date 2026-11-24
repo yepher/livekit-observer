@@ -3,10 +3,34 @@ import AppKit
 import Observation
 
 struct OperationConfirmation: Identifiable {
+    /// A value the user types before confirming, such as new metadata.
+    struct Field: Identifiable {
+        enum Check { case none, jsonObject, notFlag }
+        let id = UUID()
+        let label: String
+        var text: String
+        var multiline = false
+        var check = Check.none
+        var optional = false
+        var problem: String? {
+            if text.isEmpty { return optional ? nil : "\(label) is required." }
+            switch check {
+            case .none: return nil
+            case .notFlag: return text.hasPrefix("-") ? "\(label) can't start with a hyphen." : nil
+            case .jsonObject:
+                guard let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)), object is [String: Any] else { return "\(label) must be a JSON object." }
+                return nil
+            }
+        }
+    }
     let id = UUID()
     let projectID: String, projectName: String, title: String, explanation: String
     let protected: Bool
     let arguments: [String]
+    var fields: [Field] = []
+    /// Builds the CLI arguments from the fields' values, when there are fields.
+    var build: (([String]) -> [String])?
+    func arguments(for values: [String]) -> [String] { build?(values) ?? arguments }
 }
 
 struct SimulationRerun: Identifiable {
@@ -156,6 +180,12 @@ final class OperationsModel {
                                                explanation: explanation, protected: project.protected, arguments: arguments)
     }
 
+    func confirm(_ title: String, explanation: String, fields: [OperationConfirmation.Field], project: ProjectRef, build: @escaping ([String]) -> [String]) {
+        guard project.id == projectID else { return }
+        confirmation = OperationConfirmation(projectID: project.id, projectName: project.name, title: title, explanation: explanation,
+                                             protected: project.protected, arguments: [], fields: fields, build: build)
+    }
+
     func prepareRerun(failedOnly: Bool, project: ProjectRef) async {
         guard let run, run.finished, project.id == projectID else { return }
         let token = generation
@@ -180,12 +210,13 @@ final class OperationsModel {
         }
     }
 
-    func perform(_ request: OperationConfirmation, section: AppSection) async {
+    func perform(_ request: OperationConfirmation, section: AppSection, values: [String] = []) async {
         guard let cli, projectID == request.projectID, !mutating else { return }
+        guard request.fields.allSatisfy({ $0.problem == nil }) else { return }
         let token = generation; mutating = true; confirmation = nil
         defer { mutating = false }
         do {
-            _ = try await cli.operation(request.arguments, json: false)
+            _ = try await cli.operation(request.arguments(for: values), json: false)
             guard token == generation else { return }
             await refresh(section)
             if section == .agents { await loadAgent() }

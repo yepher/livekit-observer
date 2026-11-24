@@ -18,10 +18,11 @@ import SwiftUI
 enum RoomListenToken {
     // Verified with lk 2.19.4 --help and a locally generated --dev token.
     // https://docs.livekit.io/frontends/reference/tokens-grants/#creating-a-subscribe-only-token
+    // canPublishData lets Observer call the agent's RPC methods; it never publishes media.
     static func arguments(room: String, identity: String) -> [String] {
         ["token", "create", "--join", "--room", room, "--identity", identity,
          "--name", "Observer listener", "--grant",
-         #"{"canSubscribe":true,"canPublish":false,"canPublishData":false,"canUpdateOwnMetadata":false,"hidden":false}"#,
+         #"{"canSubscribe":true,"canPublish":false,"canPublishData":true,"canUpdateOwnMetadata":false,"hidden":false}"#,
          "--valid-for", "1h", "--token-only"]
     }
 
@@ -35,7 +36,7 @@ enum RoomListenToken {
         guard let data = Data(base64Encoded: encoded), let claims = try? JSONValue.parse(data),
               claims["sub"]?.string == identity, let grant = claims["video"], grant["room"]?.string == room,
               grant["roomJoin"]?.bool == true, grant["canSubscribe"]?.bool == true,
-              grant["canPublish"]?.bool == false, grant["canPublishData"]?.bool == false,
+              grant["canPublish"]?.bool == false, grant["canPublishData"]?.bool == true,
               !["roomAdmin", "roomCreate", "roomRecord", "ingressAdmin", "hidden"].contains(where: { grant[$0]?.bool == true })
         else { throw failure }
     }
@@ -56,37 +57,91 @@ extension LiveKitCLI: RoomListenSource {
 
 struct RoomListenSnapshot {
     enum State { case listening, reconnecting, disconnected }
-    struct Speaker: Identifiable {
+    /// A remote participant as the room connection sees it right now.
+    struct Member: Identifiable {
         let id: String, name: String
-        let level: Float
-        let speaking: Bool
+        var kind = "standard"
+        var level: Float = 0
+        var speaking = false
+        var quality = "unknown"
+        var agentState: String?
+        var audioTracks = 0
+    }
+    struct Server: Equatable {
+        var region = "", node = "", version = ""
+        var recording = false
     }
     var state: State = .listening
-    var speakers: [Speaker] = []
+    var members: [Member] = []
+    var speakers: [Member] { members.filter { $0.audioTracks > 0 } }
     var audioTracks = 0
+    var server = Server()
+    var roomMetadata = ""
     var message: String?
 }
 
 @MainActor protocol RoomListenConnection: AnyObject {
     func connect(url: String, token: String, roomID: String) async throws
     func refresh(volume: Double, output: String) async throws -> RoomListenSnapshot
+    func performRpc(to identity: String, method: String, payload: String, timeout: TimeInterval) async throws -> String
     func disconnect() async
 }
 
-/// Never captures media, publishes tracks/data, dispatches agents, or deletes a room.
+/// Never captures media, publishes tracks, dispatches agents, or deletes a room.
+/// It sends data only for RPC calls the user makes.
 @MainActor final class LiveKitListenConnection: RoomListenConnection {
     private let room = Room()
+    private let log: RoomMonitorLog?
+    private let recorder: RoomEventRecorder?
     private var expectedRoomID: String?
     private var previousOutput: AudioDevice?
     private var appliedOutput: String?
     private var volumes: [ObjectIdentifier: Double] = [:]
+    private var transcribing = false
+
+    init(log: RoomMonitorLog? = nil) {
+        self.log = log
+        recorder = log.map(RoomEventRecorder.init)
+        if let recorder { room.add(delegate: recorder) }
+    }
 
     func connect(url: String, token: String, roomID: String) async throws {
         expectedRoomID = roomID
+        if log != nil, !transcribing {
+            transcribing = (try? await room.registerTextStreamHandler(for: RoomMonitorText.transcriptionTopic) { [weak self] reader, identity in
+                await self?.transcribe(reader, from: identity.stringValue)
+            }) != nil
+        }
         // Manually subscribe only to audio, including tracks published after joining.
         try await room.connect(url: url, token: token, connectOptions: ConnectOptions(autoSubscribe: false, enableMicrophone: false))
         try Task.checkCancellation()
         guard try await room.sid().stringValue == roomID else { throw roomChanged }
+        let present = Array(room.remoteParticipants.values)
+        recorder?.seed(present)
+        var detail: [String: Any] = ["participants": present.map { ["identity": RoomMonitorText.who($0), "kind": RoomMonitorText.kind($0.kind)] }]
+        if let region = room.serverRegion { detail["region"] = region }
+        if let node = room.serverNodeId { detail["node"] = node }
+        if let version = room.serverVersion { detail["serverVersion"] = version }
+        recorder?.note(RoomMonitorEvent(.info, .connection, "Observer joined with \(present.count) other participant\(present.count == 1 ? "" : "s")",
+                                        detail: RoomMonitorText.json(detail)))
+    }
+
+    /// Streams arrive per segment; the text so far replaces the caption each time a piece arrives.
+    private func transcribe(_ reader: TextStreamReader, from identity: String) async {
+        let id = reader.info.attributes["lk.segment_id"] ?? reader.info.id
+        let final = reader.info.attributes["lk.transcription_final"] == "true"
+        let agent = room.remoteParticipants[Participant.Identity(from: identity)]?.kind == .agent
+        var text = ""
+        log?.caption(id: id, speaker: identity, agent: agent, text: text, final: final, open: true)
+        do {
+            for try await chunk in reader {
+                text += chunk
+                log?.caption(id: id, speaker: identity, agent: agent, text: text, final: final, open: true)
+            }
+        } catch {
+            log?.record(RoomMonitorEvent(.warning, .data, "Transcript stream ended early: \(error.localizedDescription)", participant: identity))
+        }
+        log?.caption(id: id, speaker: identity, agent: agent, text: text, final: final, open: false)
     }
 
     func refresh(volume: Double, output: String) async throws -> RoomListenSnapshot {
@@ -115,17 +170,28 @@ struct RoomListenSnapshot {
             }
         }
         volumes = volumes.filter { activeTracks.contains($0.key) }
-        let speakers = participants.filter { !$0.audioTracks.isEmpty }.map { participant in
-            RoomListenSnapshot.Speaker(id: participant.identity?.stringValue ?? participant.sid?.stringValue ?? "unknown",
+        let members = participants.map { participant in
+            RoomListenSnapshot.Member(id: RoomMonitorText.who(participant),
                 name: participant.name.flatMap { $0.isEmpty ? nil : $0 } ?? participant.identity?.stringValue ?? "Participant",
-                level: participant.audioLevel.isFinite ? min(1, max(0, participant.audioLevel)) : 0, speaking: participant.isSpeaking)
+                kind: RoomMonitorText.kind(participant.kind),
+                level: participant.audioLevel.isFinite ? min(1, max(0, participant.audioLevel)) : 0, speaking: participant.isSpeaking,
+                quality: RoomMonitorText.quality(participant.connectionQuality),
+                agentState: participant.attributes[RoomMonitorText.agentStateAttribute], audioTracks: participant.audioTracks.count)
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        return .init(speakers: speakers, audioTracks: subscribed,
+        let server = RoomListenSnapshot.Server(region: room.serverRegion ?? "", node: room.serverNodeId ?? "", version: room.serverVersion ?? "", recording: room.isRecording)
+        return .init(members: members, audioTracks: subscribed, server: server, roomMetadata: room.metadata ?? "",
                      message: denied > 0 ? "The room does not allow access to \(denied) audio track(s)." : nil)
+    }
+
+    func performRpc(to identity: String, method: String, payload: String, timeout: TimeInterval) async throws -> String {
+        guard room.connectionState == .connected else { throw LiveKitCLIError(kind: .notReady, message: "Join the room before calling RPC methods.") }
+        return try await room.localParticipant.performRpc(destinationIdentity: Participant.Identity(from: identity), method: method,
+                                                          payload: payload, responseTimeout: timeout)
     }
 
     func disconnect() async {
         await room.disconnect()
+        if transcribing { await room.unregisterTextStreamHandler(for: RoomMonitorText.transcriptionTopic); transcribing = false }
         if let previousOutput { AudioManager.shared.outputDevice = previousOutput }
         previousOutput = nil; appliedOutput = nil; expectedRoomID = nil; volumes = [:]
     }
@@ -142,14 +208,39 @@ struct RoomListenSnapshot {
     var muted = false
     var output = ""
     var effectiveVolume: Double { muted ? 0 : volume.isFinite ? min(1, max(0, volume)) : 1 }
+    /// Room events and the live transcript, kept across rejoins until cleared.
+    let log: RoomMonitorLog
     private let connection: any RoomListenConnection
     private let lease: ObserverAudioLease
     private let owner = UUID()
     private var setupTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
 
-    init(connection: (any RoomListenConnection)? = nil, lease: ObserverAudioLease? = nil) {
-        self.connection = connection ?? LiveKitListenConnection(); self.lease = lease ?? .shared
+    init(connection: (any RoomListenConnection)? = nil, lease: ObserverAudioLease? = nil, log: RoomMonitorLog? = nil) {
+        let log = log ?? RoomMonitorLog()
+        self.log = log
+        self.connection = connection ?? LiveKitListenConnection(log: log); self.lease = lease ?? .shared
+    }
+
+    var joined: Bool { phase == .listening || phase == .reconnecting }
+
+    /// Calls a method the participant registered with RPC, and logs the call and its answer.
+    func performRpc(to identity: String, method: String, payload: String, timeout: TimeInterval = 15) async throws -> String {
+        guard joined else { throw LiveKitCLIError(kind: .notReady, message: "Join the room before calling RPC methods.") }
+        log.record(RoomMonitorEvent(.info, .rpc, "Called \(method)", participant: identity, detail: payload.isEmpty ? nil : payload))
+        do {
+            let response = try await connection.performRpc(to: identity, method: method, payload: payload, timeout: timeout)
+            log.record(RoomMonitorEvent(.info, .rpc, "\(method) answered · \(response.utf8.count) bytes", participant: identity, detail: response.isEmpty ? nil : RoomMonitorText.payload(Data(response.utf8))))
+            return response
+        } catch {
+            log.record(RoomMonitorEvent(.error, .rpc, "\(method) failed: \(Self.describe(error))", participant: identity))
+            throw error
+        }
+    }
+
+    static func describe(_ error: Error) -> String {
+        if let error = error as? RpcError { return "\(error.message) (code \(error.code))" + (error.data.isEmpty ? "" : " · \(error.data)") }
+        return error.localizedDescription
     }
 
     func start(source: any RoomListenSource, projectURL: String, target: LiveRoom) async {
@@ -191,6 +282,7 @@ struct RoomListenSnapshot {
             // stop() owns cleanup while cancelling setup; it waits for this task first.
             guard phase != .leaving else { return }
             message = error is CancellationError ? "Joining cancelled." : error.localizedDescription
+            log.record(RoomMonitorEvent(.error, .connection, "Could not join: \(message ?? "")"))
             phase = .leaving
             await connection.disconnect(); phase = .idle; lease.release(owner)
         }
@@ -214,71 +306,7 @@ struct RoomListenSnapshot {
         setupTask?.cancel(); monitorTask?.cancel(); monitorTask = nil
         await setupTask?.value; setupTask = nil
         await connection.disconnect()
+        log.record(RoomMonitorEvent(.info, .connection, "Observer left the room"))
         snapshot = .init(); phase = .idle; lease.release(owner)
-    }
-}
-
-struct RoomListenView: View {
-    let project: ProjectRef
-    let target: LiveRoom
-    @Environment(AppModel.self) private var app
-    @Environment(\.dismiss) private var dismiss
-    @State private var listener = RoomListenSession()
-    var body: some View {
-        @Bindable var listener = listener
-        VStack(alignment: .leading, spacing: 16) {
-            HStack { Label("Listen live", systemImage: "headphones").font(.title2.bold()); Spacer(); Text(project.name).foregroundStyle(project.color) }
-            Text(target.name).font(.headline).textSelection(.enabled)
-            Label("Listen only · Microphone off", systemImage: "mic.slash.fill").foregroundStyle(.secondary)
-            Text("You appear in the room as Observer listener. Leave disconnects only this listener.").font(.caption).foregroundStyle(.secondary)
-            Picker("Speakers", selection: $listener.output) {
-                Text("System default").tag("")
-                ForEach(AudioManager.shared.outputDevices) { Text($0.name).tag($0.id) }
-            }
-            HStack {
-                Button { listener.muted.toggle() } label: { Label(listener.muted ? "Unmute playback" : "Mute playback", systemImage: listener.muted ? "speaker.slash.fill" : "speaker.wave.2.fill") }
-                Slider(value: $listener.volume, in: 0...1).accessibilityLabel("Playback volume")
-                Text("\(Int(listener.volume * 100))%").monospacedDigit().frame(width: 42)
-            }
-            if listener.phase == .connecting || listener.phase == .reconnecting || listener.phase == .leaving {
-                HStack { ProgressView().controlSize(.small); Text(listener.phase == .connecting ? "Joining room…" : listener.phase == .reconnecting ? "Reconnecting…" : "Leaving room…") }
-            }
-            if listener.phase == .listening {
-                HStack { Text("Listening · \(listener.snapshot.audioTracks) audio tracks"); Spacer(); if let start = listener.startedAt { Text(start, style: .timer).monospacedDigit() } }
-                if listener.snapshot.speakers.isEmpty { Text("Waiting for participants to publish audio…").foregroundStyle(.secondary) }
-                else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
-                            ForEach(listener.snapshot.speakers) { speaker in
-                                HStack {
-                                    Image(systemName: speaker.speaking ? "waveform" : "speaker.fill").foregroundStyle(speaker.speaking ? .green : .secondary)
-                                    Text(speaker.name).lineLimit(1); Spacer()
-                                    ProgressView(value: Double(speaker.level), total: 1).frame(width: 100).help("Incoming audio level")
-                                }
-                            }
-                        }
-                    }.frame(maxHeight: 220)
-                }
-            }
-            if let message = listener.message ?? listener.snapshot.message { Text(message).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
-            HStack {
-                Spacer()
-                if listener.phase == .idle {
-                    Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
-                    Button("Try Again") { Task { await start() } }
-                } else {
-                    Button(listener.phase == .connecting ? "Cancel" : "Leave") { Task { await listener.stop(); dismiss() } }.disabled(listener.phase == .leaving)
-                }
-            }
-        }.padding(24).frame(width: 560)
-        .task { await start() }
-        .task(id: "\(listener.volume):\(listener.muted):\(listener.output)") { await listener.refreshPlayback() }
-        .interactiveDismissDisabled(listener.phase != .idle)
-        .onDisappear { Task { await listener.stop() } }
-    }
-    private func start() async {
-        guard app.projectIdentity == project.id, let cli = app.cli else { listener.message = "Return to \(project.name) and connect the LiveKit CLI to listen."; return }
-        app.player.pause(); app.skimmer.end()
-        await listener.start(source: cli, projectURL: project.url, target: target)
     }
 }

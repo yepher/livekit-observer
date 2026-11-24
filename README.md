@@ -27,6 +27,6 @@ All screenshots use fictional projects, phone numbers, conversations, and genera
 - **Connect audio and network timing.** Overlay PCAP jitter on assigned audio channels, with a shared timeline and adjustable clock alignment.
 - **Investigate packet captures.** Import PCAP or PCAPNG files for SIP call flows, directional RTP streams, color-coded jitter charts, and local expert findings with evidence and suggested next checks.
 - **Handle busy projects.** Search indexed sessions, filter calls, and review multiple projects without downloading every recording.
-- **Monitor live activity.** Inspect agents and rooms, listen live, test an agent, and review simulation results.
+- **Monitor live activity.** Inspect agents and rooms, join a room to hear it and follow its events, live transcript, and agent state, call an agent's RPC methods, act on participants, test an agent, and review simulation results.
 - **Use optional AI assistance.** Request evidence-based session reviews, transcription comparisons, and TTS comparisons. AI features are experimental and off by default.
 - **Keep useful evidence.** Flag moments, add notes, and export session data for follow-up.
