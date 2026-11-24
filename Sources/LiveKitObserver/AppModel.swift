@@ -258,7 +258,7 @@ final class AppModel {
         sessionQuery = navigation.query; filter = navigation.search
         onlyFlagged = navigation.flagged; onlyWithRecording = navigation.recorded
         section = AppSection(rawValue: navigation.section) ?? .sessions
-        restorationAnchor = navigation.anchor; scrollAnchor = navigation.anchor?.id; needsScrollRestoration = navigation.anchor != nil
+        // A fresh launch opens at the newest sessions, not where the list was last scrolled.
     }
 
     func persistNavigation() {
@@ -547,9 +547,8 @@ final class AppModel {
                 projectedAttachmentRevision[identity] = revision
             }
             let source = recordingSourceKey
-            let restored = incomingIDs == nil && after == nil ? restorationAnchor : nil
-            let bookmark = restored.map { SessionBookmark(startedAt: $0.startedAt, id: $0.id + "\u{10FFFF}") }
-            var page = try await sessionStore.page(project: identity, query: query, after: incomingIDs == nil ? (after ?? bookmark) : nil, limit: limit,
+            // Always start from the newest; a restored scroll position only scrolls within what's loaded.
+            var page = try await sessionStore.page(project: identity, query: query, after: incomingIDs == nil ? after : nil, limit: limit,
                                                    search: search, onlyFlagged: flagged, onlyRecording: recorded, recordingSource: source, ids: incomingIDs)
             if let source {
                 for i in page.indices {

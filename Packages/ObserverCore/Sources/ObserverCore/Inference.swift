@@ -242,6 +242,18 @@ public actor AIReviewStore {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try JSONEncoder().encode(review).write(to: file(review.project + ":" + review.session), options: .atomic)
     }
+    /// Saves any AI result under a caller-chosen key (hashed into the file name).
+    public func save<T: Encodable>(_ value: T, key: String) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(value).write(to: file(key), options: .atomic)
+    }
+    public func load<T: Decodable>(_ type: T.Type, key: String) throws -> T? {
+        let url = file(key)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(type, from: Data(contentsOf: url))
+    }
     public func load(project: String, session: String) throws -> AIReviewResult? {
         let url = file(project + ":" + session)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }

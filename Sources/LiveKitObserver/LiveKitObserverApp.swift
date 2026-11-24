@@ -27,11 +27,18 @@ struct LiveKitObserverApp: App {
         }
         .commands {
             CheckForUpdatesCommand()
+            CommandGroup(replacing: .help) {
+                // GitHub renders the Markdown; the app has no help book.
+                Link("LiveKit Observer Guide", destination: URL(string: "https://github.com/yepher/livekit-observer/blob/main/docs/guide.md")!)
+                Link("How To Debug WebRTC", destination: URL(string: "https://github.com/yepher/livekit-observer/blob/main/WEBRTC-DEBUGGER.md")!)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Window for Project") {
                     if let project = activeModel.project { openWindow(id: "project", value: project) }
                     else { activeModel.showingProjectSwitcher = true }
                 }.keyboardShortcut("n", modifiers: [.command, .shift])
+                Button("Open WebRTC Internals Dump…") { WebRTCDumpOpener.choose { openWindow(id: "webrtc", value: $0) } }
+                    .keyboardShortcut("o")
             }
             CommandGroup(replacing: .saveItem) {
                 Button("Add Packet Capture…") { activeModel.captures.chooseFiles(for: activeModel.detail.flatMap { activeModel.captureSession(for: $0.row) }) }
@@ -72,6 +79,7 @@ struct LiveKitObserverApp: App {
         }
         Settings { SettingsView().environment(activeModel) }
         WindowGroup("Project", id: "project", for: String.self) { $project in ProjectWindow(project: $project) }
+        WindowGroup("WebRTC Internals", id: "webrtc", for: URL.self) { $url in WebRTCDumpWindow(url: url).environment(model) }
         MenuBarExtra("Observer Agent Health", systemImage: "waveform.path.ecg", isInserted: $agentHealthMonitoring) {
             AgentHealthMenu().environment(activeModel)
         }

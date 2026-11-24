@@ -25,6 +25,7 @@ All screenshots use fictional projects, phone numbers, conversations, and genera
 - **Review calls in context.** Browse transcripts, logs, traces, metrics, response latency, and estimated costs together.
 - **Hear and see the audio.** Compare LiveKit and egress recordings with synchronized playback, per-channel mel spectrograms, zoom, mute, and solo.
 - **Connect audio and network timing.** Overlay PCAP jitter on assigned audio channels, with a shared timeline and adjustable clock alignment.
+- **Debug the browser's side of a call.** Open a Chrome WebRTC internals or rtcstats dump to see the connection's route and state changes, per-stream charts of loss, jitter, and concealment, and findings with what to check next. [WEBRTC-DEBUGGER.md](WEBRTC-DEBUGGER.md) explains how to collect dumps from customers and read them.
 - **Investigate packet captures.** Import PCAP or PCAPNG files for SIP call flows, directional RTP streams, color-coded jitter charts, and local expert findings with evidence and suggested next checks.
 - **Handle busy projects.** Search indexed sessions, filter calls, and review multiple projects without downloading every recording.
 - **Monitor live activity.** Inspect agents and rooms, join a room to hear it and follow its events, live transcript, and agent state, call an agent's RPC methods, act on participants, test an agent, and review simulation results.
